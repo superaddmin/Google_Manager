@@ -2,9 +2,15 @@
 API 路由模块
 提供账号管理的 RESTful API
 """
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, session, current_app
+from app.models.account import Account
 from app.services.account_service import AccountService
 from app.services.auth_service import AuthService
+from app.services.googlemail_service import (
+    GooglemailTaskError,
+    GooglemailValidationError,
+    googlemail_tasks,
+)
 from app.models.account_history import AccountHistory
 
 api_bp = Blueprint('api', __name__)
@@ -33,6 +39,14 @@ def error_response(message='操作失败', code=400):
         'data': None,
         'message': message
     }), code
+
+
+@api_bp.before_request
+def require_authentication():
+    """账号接口必须通过管理员登录会话访问。"""
+    public_endpoints = {'api.login', 'api.logout', 'api.check_auth'}
+    if request.endpoint not in public_endpoints and not session.get('authenticated'):
+        return error_response('请先登录', 401)
 
 
 @api_bp.route('/accounts', methods=['GET'])
@@ -67,12 +81,8 @@ def create_account():
         创建的账号信息
     """
     data = request.get_json()
-    if not data:
+    if not isinstance(data, dict) or not data:
         return error_response('请求数据为空')
-    
-    # 验证必填字段
-    if not data.get('email') or not data.get('password'):
-        return error_response('邮箱和密码为必填项')
     
     try:
         account = AccountService.create_account(data)
@@ -95,10 +105,12 @@ def batch_import():
         导入结果统计
     """
     data = request.get_json()
-    if not data or 'accounts' not in data:
+    if not isinstance(data, dict) or 'accounts' not in data:
         return error_response('请求数据格式错误')
     
     accounts = data.get('accounts', [])
+    if not isinstance(accounts, list):
+        return error_response('导入列表必须为数组')
     if not accounts:
         return error_response('导入列表为空')
     
@@ -131,7 +143,7 @@ def update_account(account_id):
         更新后的账号信息
     """
     data = request.get_json()
-    if not data:
+    if not isinstance(data, dict) or not data:
         return error_response('请求数据为空')
     
     try:
@@ -246,6 +258,82 @@ def get_account_history(account_id):
         return error_response(f'获取历史记录失败: {str(e)}', 500)
 
 
+@api_bp.route('/googlemail/status', methods=['GET'])
+def get_googlemail_status():
+    """返回 Googlemail 运行能力和当前任务。"""
+    status = googlemail_tasks.availability()
+    status['executionEnabled'] = current_app.config['GOOGLEMAIL_EXECUTION_ENABLED']
+    status['activeTask'] = googlemail_tasks.active_task()
+    status['latestTask'] = googlemail_tasks.latest_task()
+    return success_response(data=status)
+
+
+@api_bp.route('/googlemail/tasks', methods=['POST'])
+def start_googlemail_task():
+    """从主页选择的账号创建 Googlemail 任务。"""
+    if not current_app.config['GOOGLEMAIL_EXECUTION_ENABLED']:
+        return error_response('当前环境已关闭 Googlemail 实际执行', 503)
+
+    data = request.get_json()
+    if not isinstance(data, dict):
+        return error_response('请求数据格式错误')
+    account_ids = data.get('accountIds')
+    if (
+        not isinstance(account_ids, list)
+        or not account_ids
+        or len(account_ids) > 500
+        or any(not isinstance(account_id, int) or isinstance(account_id, bool) for account_id in account_ids)
+    ):
+        return error_response('账号 ID 列表格式错误')
+
+    ordered_ids = list(dict.fromkeys(account_ids))
+    account_map = {
+        account.id: account
+        for account in Account.query.filter(Account.id.in_(ordered_ids)).all()
+    }
+    if len(account_map) != len(ordered_ids):
+        return error_response('所选账号包含不存在的记录', 404)
+    accounts = [account_map[account_id] for account_id in ordered_ids]
+
+    try:
+        task = googlemail_tasks.start_task(
+            current_app._get_current_object(),
+            accounts,
+            data.get('options'),
+        )
+        return success_response(data=task, message='Googlemail 任务已启动'), 202
+    except GooglemailValidationError as error:
+        return error_response(str(error))
+    except GooglemailTaskError as error:
+        error_code = str(error)
+        messages = {
+            'TASK_ALREADY_RUNNING': '已有 Googlemail 任务正在运行',
+            'NODE_NOT_FOUND': '本机未找到 Node.js',
+            'ENTRY_NOT_FOUND': 'Googlemail 启动入口不存在',
+            'DEPENDENCIES_NOT_INSTALLED': 'Googlemail 依赖尚未安装',
+        }
+        code = 409 if error_code == 'TASK_ALREADY_RUNNING' else 503
+        return error_response(messages.get(error_code, 'Googlemail 任务启动失败'), code)
+
+
+@api_bp.route('/googlemail/tasks/<task_id>', methods=['GET'])
+def get_googlemail_task(task_id):
+    """查询 Googlemail 任务状态。"""
+    task = googlemail_tasks.get_task(task_id)
+    if not task:
+        return error_response('Googlemail 任务不存在', 404)
+    return success_response(data=task)
+
+
+@api_bp.route('/googlemail/tasks/<task_id>/cancel', methods=['POST'])
+def cancel_googlemail_task(task_id):
+    """取消正在运行的 Googlemail 任务。"""
+    task = googlemail_tasks.cancel_task(task_id)
+    if not task:
+        return error_response('Googlemail 任务不存在', 404)
+    return success_response(data=task, message='Googlemail 任务已请求取消')
+
+
 @api_bp.route('/auth/login', methods=['POST'])
 def login():
     """
@@ -267,7 +355,7 @@ def login():
         return error_response(f'您的 IP 已被封禁，剩余时间：{hours}小时{minutes}分钟', 403)
     
     data = request.get_json()
-    if not data or 'password' not in data:
+    if not isinstance(data, dict) or 'password' not in data:
         return error_response('请输入密码')
     
     password = data.get('password', '')
@@ -280,6 +368,9 @@ def login():
     if AuthService.verify_password(password):
         # 登录成功，清除失败记录
         AuthService.clear_failed_attempts(client_ip)
+        session.clear()
+        session.permanent = True
+        session['authenticated'] = True
         return success_response(message='登录成功')
     else:
         # 登录失败，记录尝试
@@ -289,6 +380,13 @@ def login():
             return error_response('密码错误次数过多，您的 IP 已被封禁 24 小时', 403)
         else:
             return error_response(f'密码错误，还剩 {remaining_attempts} 次尝试机会', 401)
+
+
+@api_bp.route('/auth/logout', methods=['POST'])
+def logout():
+    """清除管理员登录会话。"""
+    session.clear()
+    return success_response(message='已退出登录')
 
 
 @api_bp.route('/auth/check', methods=['GET'])
@@ -308,10 +406,12 @@ def check_auth():
         return jsonify({
             'success': False,
             'banned': True,
+            'authenticated': bool(session.get('authenticated')),
             'message': f'您的 IP 已被封禁，剩余时间：{hours}小时{minutes}分钟'
         })
     
     return jsonify({
         'success': True,
-        'banned': False
+        'banned': False,
+        'authenticated': bool(session.get('authenticated'))
     })

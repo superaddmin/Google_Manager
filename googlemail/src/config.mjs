@@ -36,7 +36,8 @@ export function parseEmailListEnv(name, env = process.env) {
 const accountsFileSetting = process.env.ACCOUNTS_FILE?.trim()
   || '宝贝信息-114260514183055495.txt';
 const ACCOUNTS_FILE = path.resolve(process.cwd(), accountsFileSetting);
-const OUTPUT_DIR = path.join(process.cwd(), 'output');
+const outputDirSetting = process.env.OUTPUT_DIR?.trim() || 'output';
+const OUTPUT_DIR = path.resolve(process.cwd(), outputDirSetting);
 const PROGRESS_FILE = path.join(OUTPUT_DIR, 'progress.json');
 const RESULT_FILE = path.join(OUTPUT_DIR, 'result.txt');
 const MANUAL_REVIEW_FILE = path.join(OUTPUT_DIR, 'manual-review.jsonl');
@@ -45,7 +46,8 @@ const HEADLESS = parseBooleanEnv('HEADLESS', true);
 const SLOW_MO = parseIntegerEnv('SLOW_MO', 200);
 const ACCOUNT_DELAY = parseIntegerEnv('ACCOUNT_DELAY', 5000);
 
-const USER_DATA_DIR = path.join(process.cwd(), 'browser-data');
+const userDataDirSetting = process.env.USER_DATA_DIR?.trim() || 'browser-data';
+const USER_DATA_DIR = path.resolve(process.cwd(), userDataDirSetting);
 
 const RECOVERY_EMAIL_POOL = parseEmailListEnv('RECOVERY_EMAIL_POOL');
 const ACCOUNTS_PER_RECOVERY_EMAIL = parseIntegerEnv('ACCOUNTS_PER_RECOVERY', 5, 1);

@@ -1,4 +1,6 @@
 import { generateBase32Secret, generateTOTP, getTOTPTimeRemaining } from './totp.mjs';
+import path from 'path';
+import { OUTPUT_DIR } from './config.mjs';
 import { maskEmail, redactSensitiveText } from './redaction.mjs';
 
 function generateNewSecret() {
@@ -12,6 +14,10 @@ function manualReviewResult(error, newSecret) {
     newSecret,
     requiresManualReview: true,
   };
+}
+
+function debugScreenshotPath(filename) {
+  return path.join(OUTPUT_DIR, filename);
 }
 
 export async function setupNewAuthenticator(page, logger, createSecret = generateNewSecret) {
@@ -52,7 +58,7 @@ export async function setupNewAuthenticator(page, logger, createSecret = generat
 
   if (!secretInput) {
     logger('  [错误] 找不到手动输入密钥的输入框，需要人工复核账号状态');
-    await page.screenshot({ path: 'output/debug-setup-secret-input.png' }).catch(() => {});
+    await page.screenshot({ path: debugScreenshotPath('debug-setup-secret-input.png') }).catch(() => {});
     return manualReviewResult('找不到手动输入密钥的输入框', newSecret);
   }
 
@@ -81,7 +87,7 @@ export async function setupNewAuthenticator(page, logger, createSecret = generat
 
   if (!codeInput) {
     logger('  [错误] 找不到新验证器验证码输入框，需要人工复核账号状态');
-    await page.screenshot({ path: 'output/debug-setup-code-input.png' }).catch(() => {});
+    await page.screenshot({ path: debugScreenshotPath('debug-setup-code-input.png') }).catch(() => {});
     return manualReviewResult('找不到新验证器验证码输入框', newSecret);
   }
 
@@ -208,7 +214,7 @@ async function changeRecoveryEmail(page, targetEmail, password, logger) {
     const currentUrl = await page.url();
     if (currentUrl.includes('signin') || currentUrl.includes('challenge')) {
       logger('  [错误] 访问恢复邮箱页面需要重新登录');
-      await page.screenshot({ path: 'output/debug-recovery-reauth.png', fullPage: true }).catch(() => {});
+      await page.screenshot({ path: debugScreenshotPath('debug-recovery-reauth.png'), fullPage: true }).catch(() => {});
       return { success: false, error: '访问恢复邮箱页面需要重新登录' };
     }
 
@@ -308,7 +314,7 @@ async function changeRecoveryEmail(page, targetEmail, password, logger) {
 
     if (!emailInput) {
       logger('  [警告] 找不到恢复邮箱输入框，正在截图...');
-      await page.screenshot({ path: 'output/debug-recovery-no-input.png', fullPage: true }).catch(() => {});
+      await page.screenshot({ path: debugScreenshotPath('debug-recovery-no-input.png'), fullPage: true }).catch(() => {});
       return { success: false, error: '找不到恢复邮箱输入框' };
     }
 
@@ -373,7 +379,7 @@ async function changeRecoveryEmail(page, targetEmail, password, logger) {
 
     if (needsVerification) {
       logger('  ⚠️ Google 要求验证新恢复邮箱，等待手动输入验证码...');
-      await page.screenshot({ path: 'output/debug-recovery-verify.png', fullPage: true }).catch(() => {});
+      await page.screenshot({ path: debugScreenshotPath('debug-recovery-verify.png'), fullPage: true }).catch(() => {});
 
       const verifyInput = await page.$('input[type="tel"], input[aria-label*="验证码"], input[aria-label*="code"]').catch(() => null);
       if (verifyInput) {
@@ -426,7 +432,7 @@ async function changeRecoveryEmail(page, targetEmail, password, logger) {
     const errorMsg = `恢复邮箱修改失败: ${err.message}`;
     logger(`  [异常] ${errorMsg}`);
     logger(`  [堆栈] ${err.stack?.substring(0, 500) || '无堆栈信息'}`);
-    await page.screenshot({ path: 'output/debug-recovery-error.png', fullPage: true }).catch(() => {});
+    await page.screenshot({ path: debugScreenshotPath('debug-recovery-error.png'), fullPage: true }).catch(() => {});
     return { success: false, error: errorMsg };
   }
 }
@@ -613,13 +619,13 @@ export async function loginAndChange2FA(page, account, logger, targetRecoveryEma
 
       if (!totpSuccess) {
         logger('  所有验证码均被拒绝，正在截图...');
-        await page.screenshot({ path: 'output/debug-totp-fail.png', fullPage: true }).catch(() => {});
+        await page.screenshot({ path: debugScreenshotPath('debug-totp-fail.png'), fullPage: true }).catch(() => {});
         return { success: false, error: '所有TOTP验证码均被拒绝，密钥可能不正确' };
       }
     } else {
       logger('  未检测到两步验证输入框，正在截图分析...');
-      await page.screenshot({ path: 'output/debug-no-totp.png', fullPage: true }).catch(() => {});
-      logger('  截图已保存到 output/debug-no-totp.png');
+      await page.screenshot({ path: debugScreenshotPath('debug-no-totp.png'), fullPage: true }).catch(() => {});
+      logger('  截图已保存到任务输出目录');
 
       const altMethods = [
         'div:has-text("尝试其他方式")',
@@ -639,7 +645,7 @@ export async function loginAndChange2FA(page, account, logger, targetRecoveryEma
       logger(`  [错误] 仍在验证页面: ${currentUrl}`);
       if (currentUrl.includes('challenge/pwd')) {
         logger('  检测到密码再验证页面，可能密码错误或需要额外验证');
-        await page.screenshot({ path: 'output/debug-challenge-pwd.png', fullPage: true }).catch(() => {});
+        await page.screenshot({ path: debugScreenshotPath('debug-challenge-pwd.png'), fullPage: true }).catch(() => {});
       }
       if (await page.isVisible('div:has-text("验证码错误")')) {
         return { success: false, error: '验证码错误' };
@@ -740,7 +746,7 @@ export async function loginAndChange2FA(page, account, logger, targetRecoveryEma
 
     if (!foundOff) {
       logger('  [警告] 找不到关闭按钮，尝试截图...');
-      await page.screenshot({ path: 'output/debug-turnoff.png' }).catch(() => {});
+      await page.screenshot({ path: debugScreenshotPath('debug-turnoff.png') }).catch(() => {});
       return { success: false, error: '找不到关闭两步验证的按钮' };
     }
 
@@ -792,7 +798,7 @@ export async function loginAndChange2FA(page, account, logger, targetRecoveryEma
 
     if (!started) {
       logger('  [错误] 找不到开始设置按钮');
-      await page.screenshot({ path: 'output/debug-start.png' }).catch(() => {});
+      await page.screenshot({ path: debugScreenshotPath('debug-start.png') }).catch(() => {});
       return { success: false, error: '找不到开始设置按钮' };
     }
 
@@ -834,7 +840,7 @@ export async function loginAndChange2FA(page, account, logger, targetRecoveryEma
     const errorMsg = err.message;
     logger(`  [异常] ${errorMsg}`);
     logger(`  [堆栈] ${err.stack?.substring(0, 500) || '无堆栈信息'}`);
-    await page.screenshot({ path: 'output/debug-error.png' }).catch(() => {});
+    await page.screenshot({ path: debugScreenshotPath('debug-error.png') }).catch(() => {});
     return { success: false, error: errorMsg };
   }
 }

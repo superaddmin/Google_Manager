@@ -326,6 +326,7 @@ const AccountListView = ({
                             onPageSizeChange={pagination.changePageSize}
                             hasNextPage={pagination.hasNextPage}
                             hasPrevPage={pagination.hasPrevPage}
+                            darkMode={darkMode}
                         />
                     )}
                 </div>

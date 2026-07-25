@@ -11,6 +11,8 @@
 | 变量 | 类型 | 默认值 | 适用范围 | 说明 |
 |------|------|--------|----------|------|
 | `ACCOUNTS_FILE` | string | 项目默认账号文件 | main/test-login/verify-2fa | 账号文件路径，可为相对或绝对路径 |
+| `OUTPUT_DIR` | string | `output` | main.mjs | 结果、进度、日志与调试截图目录 |
+| `USER_DATA_DIR` | string | `browser-data` | main.mjs | Playwright 持久化浏览器数据目录 |
 | `HEADLESS` | boolean | `true` | main.mjs | 设为 `false` 显示浏览器窗口 |
 | `SLOW_MO` | number | `200` | main.mjs | 操作间延迟(毫秒)，模拟人类操作速度 |
 | `ACCOUNT_DELAY` | number | `5000` | main.mjs | 账号间等待时间(毫秒)，避免触发频率限制 |
@@ -87,11 +89,11 @@ node src/verify-2fa.mjs
 | 常量 | 值 | 对应环境变量 | 说明 |
 |------|------|-------------|------|
 | `ACCOUNTS_FILE` | `宝贝信息-114260514183055495.txt` | `ACCOUNTS_FILE` | 账号信息文件路径 |
-| `OUTPUT_DIR` | `output/` | - | 运行输出目录 |
+| `OUTPUT_DIR` | `output/` | `OUTPUT_DIR` | 运行输出目录 |
 | `PROGRESS_FILE` | `output/progress.json` | - | 进度文件路径 |
 | `RESULT_FILE` | `output/result.txt` | - | 结果输出路径 |
 | `MANUAL_REVIEW_FILE` | `output/manual-review.jsonl` | - | 关键流程中断后的人工复核记录 |
-| `USER_DATA_DIR` | `browser-data/` | - | 浏览器数据持久化目录 |
+| `USER_DATA_DIR` | `browser-data/` | `USER_DATA_DIR` | 浏览器数据持久化目录 |
 | `HEADLESS` | `true` | `HEADLESS` | 无头模式开关 |
 | `SLOW_MO` | `200` | `SLOW_MO` | 操作间延迟(ms) |
 | `ACCOUNT_DELAY` | `5000` | `ACCOUNT_DELAY` | 账号间延迟(ms) |

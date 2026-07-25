@@ -8,6 +8,23 @@ from app.models.account_history import AccountHistory
 from app.utils.totp import generate_totp, get_remaining_seconds
 
 
+def normalize_account_data(data, require_all=False):
+    """验证必填字段并规范化账号数据。"""
+    if not isinstance(data, dict):
+        raise ValueError('账号数据格式错误')
+
+    normalized = dict(data)
+    for field, display_name in (('email', '邮箱'), ('password', '密码')):
+        if require_all or field in normalized:
+            value = normalized.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f'{display_name}为必填项')
+
+    if 'email' in normalized:
+        normalized['email'] = normalized['email'].strip()
+    return normalized
+
+
 class AccountService:
     """账号服务类"""
     
@@ -47,7 +64,7 @@ class AccountService:
         Returns:
             Account 对象或 None
         """
-        return Account.query.get(account_id)
+        return db.session.get(Account, account_id)
     
     @staticmethod
     def create_account(data):
@@ -63,6 +80,8 @@ class AccountService:
         Raises:
             ValueError: 邮箱已存在
         """
+        data = normalize_account_data(data, require_all=True)
+
         # 检查邮箱是否已存在
         existing = Account.query.filter_by(email=data['email']).first()
         if existing:
@@ -97,32 +116,39 @@ class AccountService:
         failed_count = 0
         failed_emails = []
         imported_accounts = []
+        existing_emails = {
+            email for (email,) in db.session.query(Account.email).all()
+        }
         
         for data in accounts:
             try:
-                # 跳过已存在的邮箱
-                existing = Account.query.filter_by(email=data.get('email', '')).first()
-                if existing:
+                normalized = normalize_account_data(data, require_all=True)
+                email = normalized['email']
+
+                # 跳过数据库中或当前批次内已存在的邮箱
+                if email in existing_emails:
                     failed_count += 1
-                    failed_emails.append(data.get('email', '未知'))
+                    failed_emails.append(email)
                     continue
                 
                 account = Account(
-                    email=data.get('email', ''),
-                    password=data.get('password', ''),
-                    recovery=data.get('recovery', ''),
-                    secret=data.get('secret', ''),
-                    remark=data.get('remark', ''),
+                    email=email,
+                    password=normalized['password'],
+                    recovery=normalized.get('recovery', ''),
+                    secret=normalized.get('secret', ''),
+                    remark=normalized.get('remark', ''),
                     status='inactive'  # 导入的账号默认为未开启状态
                 )
                 
                 db.session.add(account)
+                existing_emails.add(email)
                 success_count += 1
                 imported_accounts.append(account)
                 
-            except Exception as e:
+            except ValueError:
                 failed_count += 1
-                failed_emails.append(data.get('email', '未知'))
+                failed_email = data.get('email', '未知') if isinstance(data, dict) else '未知'
+                failed_emails.append(failed_email or '未知')
         
         # 提交所有成功的记录
         if success_count > 0:
@@ -147,9 +173,11 @@ class AccountService:
         Returns:
             更新后的账号字典或 None
         """
-        account = Account.query.get(account_id)
+        account = db.session.get(Account, account_id)
         if not account:
             return None
+
+        data = normalize_account_data(data)
         
         # 如果更新邮箱，检查是否与其他账号冲突
         if 'email' in data and data['email'] != account.email:
@@ -158,8 +186,6 @@ class AccountService:
                 raise ValueError(f"邮箱 {data['email']} 已被其他账号使用")
         
         # 更新字段并记录历史
-        tracked_fields = ['password', 'secret', 'recovery']  # 需要跟踪的字段
-        
         if 'email' in data:
             account.email = data['email']
         if 'password' in data:
@@ -214,7 +240,7 @@ class AccountService:
         Returns:
             是否删除成功
         """
-        account = Account.query.get(account_id)
+        account = db.session.get(Account, account_id)
         if not account:
             return False
         
@@ -233,7 +259,7 @@ class AccountService:
         Returns:
             更新后的账号字典或 None
         """
-        account = Account.query.get(account_id)
+        account = db.session.get(Account, account_id)
         if not account:
             return None
         
@@ -254,7 +280,7 @@ class AccountService:
         Returns:
             更新后的账号字典或 None
         """
-        account = Account.query.get(account_id)
+        account = db.session.get(Account, account_id)
         if not account:
             return None
         
@@ -288,7 +314,7 @@ class AccountService:
         Returns:
             包含验证码和剩余时间的字典，或 None
         """
-        account = Account.query.get(account_id)
+        account = db.session.get(Account, account_id)
         if not account or not account.secret:
             return None
         

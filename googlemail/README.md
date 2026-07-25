@@ -15,6 +15,10 @@ npm run test:startup
 
 `npm start` 与 `npm run test-login` 会登录并修改账号安全设置，执行前应确认账号范围、输入文件和恢复邮箱配置，并先完成单账号验证。
 
+## GoogleManager 主页调用
+
+父项目通过 `app/services/googlemail_service.py` 启动 `src/main.mjs`。每个主页任务使用独立的 `runtime/tasks/<task-id>/` 输入和输出目录；该目录、浏览器数据、结果和日志均由 Git 忽略。`OUTPUT_DIR` 可由父进程设置，调试截图会写入对应任务输出目录。
+
 ## 文档
 
 - [架构说明](docs/README.md)

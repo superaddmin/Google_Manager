@@ -1,6 +1,7 @@
 node_modules/
 browser-data/
 output/
+runtime/
 coverage/
 test-temp-*/
 playwright-report/

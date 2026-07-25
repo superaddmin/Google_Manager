@@ -3,6 +3,7 @@ Flask 应用配置模块
 包含开发、生产和测试环境的配置
 """
 import os
+from datetime import timedelta
 
 # 获取项目根目录
 basedir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
@@ -11,6 +12,10 @@ basedir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 class Config:
     """基础配置类"""
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
+    PERMANENT_SESSION_LIFETIME = timedelta(days=7)
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    GOOGLEMAIL_EXECUTION_ENABLED = True
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
     # 数据库配置
@@ -31,6 +36,7 @@ class ProductionConfig(Config):
 class TestingConfig(Config):
     """测试环境配置"""
     TESTING = True
+    GOOGLEMAIL_EXECUTION_ENABLED = False
     SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
 
 

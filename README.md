@@ -44,6 +44,13 @@ https://github.com/superaddmin/Google_Manager.git
 - 抽屉式面板展示修改历史
 - 修改前后对比显示
 
+### ✉️ Googlemail 自动化
+
+- 从主页直接选择本地账号并启动 Googlemail 任务
+- 支持无头模式、操作延迟、账号间隔、恢复邮箱池和运行超时配置
+- 支持任务进度查询、取消、失败计数和人工复核计数
+- 自动把已完成任务的新 2FA 密钥及已确认恢复邮箱写回账号历史
+
 ### 🔒 安全特性
 
 - **管理员密码保护** - 需密码登录才能访问系统
@@ -218,6 +225,10 @@ python migrate_history.py  # 历史记录表迁移
 ### Googlemail 本地集成
 
 `googlemail/` 是从本机 `F:\Googlemail` 受控复制的源码快照，由当前仓库直接管理，不使用 Git submodule。账号文件、浏览器会话、运行输出、日志、覆盖率和依赖目录不会纳入版本控制。
+
+登录主页后打开 `Googlemail` 视图，可选择账号、设置运行参数并启动、查询或取消任务。Flask 通过受控 Node.js 子进程调用本地 Googlemail，每次任务的输入与输出保存在忽略目录 `googlemail/runtime/tasks/<task-id>/`，HTTP 响应只返回任务状态和计数。
+
+testing 配置会关闭实际 Googlemail 执行；development/production 配置默认开启。启动前需先安装本地 Node.js 依赖：
 
 ```powershell
 Push-Location .\googlemail

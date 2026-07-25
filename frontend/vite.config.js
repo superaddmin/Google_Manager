@@ -16,7 +16,7 @@ export default defineConfig({
         // 代理 API 请求到 Flask 后端
         proxy: {
             '/api': {
-                target: 'http://localhost:5000',
+                target: 'http://localhost:8002',
                 changeOrigin: true,
             }
         }

@@ -145,7 +145,12 @@ const api = {
             : `${API_BASE}/accounts`;
         const res = await fetch(url);
         const data = await res.json();
-        return data.success ? data.data : [];
+        if (!res.ok || !data.success) {
+            const error = new Error(data.message || '加载账号失败');
+            error.status = res.status;
+            throw error;
+        }
+        return data.data;
     },
 
     // 批量导入账号
@@ -201,6 +206,40 @@ const api = {
     // 获取账号修改历史记录
     async getAccountHistory(id) {
         const res = await fetch(`${API_BASE}/accounts/${id}/history`);
+        return await res.json();
+    },
+
+    async getGooglemailStatus() {
+        const res = await fetch(`${API_BASE}/googlemail/status`);
+        return await res.json();
+    },
+
+    async startGooglemailTask(accountIds, options) {
+        const res = await fetch(`${API_BASE}/googlemail/tasks`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accountIds, options })
+        });
+        return await res.json();
+    },
+
+    async getGooglemailTask(taskId) {
+        const res = await fetch(`${API_BASE}/googlemail/tasks/${taskId}`);
+        return await res.json();
+    },
+
+    async cancelGooglemailTask(taskId) {
+        const res = await fetch(`${API_BASE}/googlemail/tasks/${taskId}/cancel`, {
+            method: 'POST'
+        });
+        return await res.json();
+    },
+
+    // 退出登录并清除服务端会话
+    async logout() {
+        const res = await fetch(`${API_BASE}/auth/logout`, {
+            method: 'POST'
+        });
         return await res.json();
     }
 };

@@ -1,0 +1,12 @@
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - heading "GoogleManager" [level=1] [ref=e10]
+    - paragraph [ref=e11]: 请输入管理员密码以访问系统
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]: 管理员密码
+      - generic [ref=e15]:
+        - textbox "请输入密码" [ref=e19]
+        - button [ref=e20] [cursor=pointer]
+    - button "进入系统" [ref=e24] [cursor=pointer]
+    - paragraph [ref=e25]: 连续输错 3 次密码将被封禁 24 小时

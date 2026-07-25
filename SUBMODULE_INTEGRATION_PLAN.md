@@ -27,7 +27,7 @@
 3. 让复制后的 Googlemail 在主项目内独立安装、测试和启动检查。
 4. 提供父仓库级本地复制集成测试。
 
-本阶段不声称 Flask 已经调用 Googlemail，也不新增 HTTP 接口。实际运行仍以 Googlemail CLI 为唯一操作界面；后续若需要从 Flask 触发任务，应另行设计子进程适配器和任务状态协议。
+首阶段仅完成源码复制与独立 CLI 验证。追加阶段已经实现 Flask 子进程适配器、主页操作入口和任务状态协议，同时保留 CLI 作为独立运维入口。
 
 ### 1.3 成功标准
 
@@ -221,17 +221,28 @@ try {
 
 `npm start` 和 `npm run test-login` 会读取本地账号文件并执行浏览器流程，不属于安装验证命令，也不应进入自动化 CI。
 
-### 5.3 后续 Flask 集成要求
+### 5.3 Flask 与主页集成（已实现）
 
-若后续需要由 Flask 调用，新增一个子进程适配器，并先定义以下接口事实：
+`app/services/googlemail_service.py` 负责子进程适配，接口事实如下：
 
-- 输入：任务 ID、账号文件路径和非敏感运行选项。
-- 输出：仅返回任务状态、计数和脱敏错误码。
+- 输入：主页选择的本地账号 ID 和非敏感运行选项；服务端生成任务 ID 与独立账号文件。
+- 输出：仅返回任务状态、总数、完成/失败/待处理/同步/人工复核计数和脱敏错误码。
 - 工作目录：固定为 `F:\Google_Manager\googlemail`。
-- 生命周期：启动、查询、取消、超时和进程退出码。
-- 敏感数据：密码、TOTP 密钥、Cookie、截图和结果文件不通过 Flask 日志返回。
+- 运行目录：`googlemail/runtime/tasks/<task-id>/`，由 Git 忽略。
+- 生命周期：启动、查询、取消、最长运行时间、进程退出码和最近任务内存状态。
+- 并发：同一 Flask 进程只允许一个 Googlemail 任务运行，避免共用浏览器数据冲突。
+- 结果同步：成功结果只在服务端读取，并将新 2FA 密钥及已确认恢复邮箱写回账号历史。
+- 敏感数据：密码、TOTP 密钥、Cookie、截图、子进程输出和结果文件不通过 HTTP 或 Flask 日志返回。
+- testing 配置：`GOOGLEMAIL_EXECUTION_ENABLED=False`，用于本地审核时阻止真实任务。
 
-在该适配器落地前，文档不得声称主项目已经通过接口调用 Googlemail。
+主页使用以下接口：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/googlemail/status` | 查询依赖、执行开关和当前任务 |
+| `POST` | `/api/googlemail/tasks` | 选择账号并启动任务 |
+| `GET` | `/api/googlemail/tasks/<task-id>` | 查询任务状态与计数 |
+| `POST` | `/api/googlemail/tasks/<task-id>/cancel` | 请求取消任务 |
 
 ---
 
@@ -420,6 +431,8 @@ git clean -nd -- googlemail tests\googlemail-local-copy.test.mjs
 - [x] 已安装复制目录依赖。
 - [x] 已通过 Googlemail 单元测试、覆盖率与启动检查。
 - [x] 已通过父仓库本地复制集成测试。
+- [x] 已实现 Flask 子进程适配器和主页 Googlemail 操作视图。
+- [x] 已覆盖启动、查询、取消、超时、结果同步和 testing 执行保护。
 - [x] 已完成 Git 索引敏感文件检查。
 - [x] 已完成提交前审核；提交与推送结果以 Git 历史和交付记录为准。
 

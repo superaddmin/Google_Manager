@@ -82,7 +82,7 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
             />
 
             {/* 抽屉面板 */}
-            <div className={`fixed right-0 top-0 h-full w-[420px] z-50 transform transition-all duration-300 ease-out shadow-2xl ${darkMode
+            <div className={`fixed right-0 top-0 h-full w-full max-w-[420px] z-50 transform transition-all duration-300 ease-out shadow-2xl ${darkMode
                 ? 'bg-gradient-to-b from-slate-800 to-slate-900'
                 : 'bg-gradient-to-b from-white to-slate-50'
                 }`}>

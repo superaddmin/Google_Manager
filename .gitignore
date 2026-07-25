@@ -20,6 +20,7 @@ node_modules/
 # Vendored Googlemail runtime data
 googlemail/browser-data/
 googlemail/output/
+googlemail/runtime/
 googlemail/coverage/
 googlemail/test-temp-*/
 googlemail/playwright-report/

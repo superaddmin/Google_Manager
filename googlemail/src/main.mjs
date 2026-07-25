@@ -154,10 +154,13 @@ async function main() {
           recoveryStatus = ' | 恢复邮箱: ✅ 已修改';
         }
 
+        const effectiveRecoveryEmail = targetRecoveryEmail && result.recoveryResult?.success
+          ? targetRecoveryEmail
+          : account.recoveryEmail;
         const resultLine = [
           email,
           account.password,
-          account.recoveryEmail,
+          effectiveRecoveryEmail,
           result.newSecret,
         ].join('----');
         await appendResult(config.RESULT_FILE, resultLine);

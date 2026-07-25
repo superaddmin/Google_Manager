@@ -4,7 +4,7 @@ Flask-SQLAlchemy==3.1.1
 Flask-CORS==4.0.0
 
 # 数据库
-SQLAlchemy==2.0.23
+SQLAlchemy==2.0.51
 
 # TOTP 2FA 支持
 pyotp==2.9.0

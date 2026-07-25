@@ -4,7 +4,7 @@ import { UserPlus, FileText, Plus, Activity } from 'lucide-react';
 /**
  * 导入视图组件
  */
-const ImportView = ({ onImport, onCancel }) => {
+const ImportView = ({ onImport, onCancel, darkMode = false }) => {
     const [importMode, setImportMode] = useState('single'); // 'single' 或 'batch'
     const [text, setText] = useState('');
     const [preview, setPreview] = useState([]);
@@ -69,21 +69,28 @@ const ImportView = ({ onImport, onCancel }) => {
     };
 
     const isSingleFormValid = singleForm.email.trim() && singleForm.password.trim();
+    const panelClass = darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200';
+    const inputClass = darkMode
+        ? 'bg-slate-900 border-slate-600 text-slate-100 placeholder-slate-500'
+        : 'bg-slate-50 border-slate-200 text-slate-800 placeholder-slate-400';
+    const secondaryButtonClass = darkMode
+        ? 'bg-slate-800 border-slate-600 text-slate-300 hover:bg-slate-700'
+        : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50';
 
     return (
         <div className="max-w-4xl mx-auto animate-in fade-in zoom-in-95 duration-500">
             <div className="mb-8">
-                <h1 className="text-2xl font-bold text-slate-900">导入账号</h1>
-                <p className="text-slate-500">导入后状态默认设为"未开启"</p>
+                <h1 className={`text-2xl font-bold ${darkMode ? 'text-slate-100' : 'text-slate-900'}`}>导入账号</h1>
+                <p className={darkMode ? 'text-slate-400' : 'text-slate-500'}>导入后状态默认设为"未开启"</p>
             </div>
 
             {/* 切换标签 */}
-            <div className="flex gap-2 mb-6 bg-slate-100 p-1 rounded-xl w-fit">
+            <div className={`flex gap-2 mb-6 p-1 rounded-xl w-fit ${darkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
                 <button
                     onClick={() => setImportMode('single')}
                     className={`flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium transition-all ${importMode === 'single'
-                        ? 'bg-white shadow-sm text-blue-600'
-                        : 'text-slate-500 hover:text-slate-700'
+                        ? (darkMode ? 'bg-slate-700 shadow-sm text-blue-400' : 'bg-white shadow-sm text-blue-600')
+                        : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
                         }`}
                 >
                     <UserPlus size={18} />
@@ -92,8 +99,8 @@ const ImportView = ({ onImport, onCancel }) => {
                 <button
                     onClick={() => setImportMode('batch')}
                     className={`flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium transition-all ${importMode === 'batch'
-                        ? 'bg-white shadow-sm text-blue-600'
-                        : 'text-slate-500 hover:text-slate-700'
+                        ? (darkMode ? 'bg-slate-700 shadow-sm text-blue-400' : 'bg-white shadow-sm text-blue-600')
+                        : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
                         }`}
                 >
                     <FileText size={18} />
@@ -105,14 +112,14 @@ const ImportView = ({ onImport, onCancel }) => {
                 // 单个导入表单
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                     <div className="space-y-4">
-                        <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
+                        <div className={`p-6 rounded-3xl border shadow-sm ${panelClass}`}>
                             <div className="flex items-center gap-2 mb-6 text-blue-600">
                                 <UserPlus size={20} />
                                 <h2 className="font-bold">单个账号信息</h2>
                             </div>
                             <div className="space-y-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-slate-600 mb-2">
+                                    <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                                         邮箱账号 <span className="text-red-500">*</span>
                                     </label>
                                     <input
@@ -120,11 +127,11 @@ const ImportView = ({ onImport, onCancel }) => {
                                         value={singleForm.email}
                                         onChange={(e) => handleSingleFormChange('email', e.target.value)}
                                         placeholder="example@gmail.com"
-                                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                                        className={`w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all ${inputClass}`}
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-slate-600 mb-2">
+                                    <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                                         登录密码 <span className="text-red-500">*</span>
                                     </label>
                                     <input
@@ -132,11 +139,11 @@ const ImportView = ({ onImport, onCancel }) => {
                                         value={singleForm.password}
                                         onChange={(e) => handleSingleFormChange('password', e.target.value)}
                                         placeholder="输入密码"
-                                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                                        className={`w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all ${inputClass}`}
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-slate-600 mb-2">
+                                    <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                                         恢复邮箱 <span className="text-slate-400 text-xs">(可选)</span>
                                     </label>
                                     <input
@@ -144,11 +151,11 @@ const ImportView = ({ onImport, onCancel }) => {
                                         value={singleForm.recovery}
                                         onChange={(e) => handleSingleFormChange('recovery', e.target.value)}
                                         placeholder="recovery@example.com"
-                                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                                        className={`w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all ${inputClass}`}
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-slate-600 mb-2">
+                                    <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                                         2FA 密钥 <span className="text-slate-400 text-xs">(可选)</span>
                                     </label>
                                     <input
@@ -156,13 +163,13 @@ const ImportView = ({ onImport, onCancel }) => {
                                         value={singleForm.secret}
                                         onChange={(e) => handleSingleFormChange('secret', e.target.value)}
                                         placeholder="TOTP密钥"
-                                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                                        className={`w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all ${inputClass}`}
                                     />
                                 </div>
                             </div>
                         </div>
                         <div className="flex gap-4">
-                            <button onClick={onCancel} className="flex-1 py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold hover:bg-slate-50 transition-all">
+                            <button onClick={onCancel} className={`flex-1 py-4 border rounded-2xl font-bold transition-all ${secondaryButtonClass}`}>
                                 返回列表
                             </button>
                             <button
@@ -230,23 +237,23 @@ const ImportView = ({ onImport, onCancel }) => {
                 // 批量导入（原有逻辑）
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                     <div className="space-y-4">
-                        <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
+                        <div className={`p-6 rounded-3xl border shadow-sm ${panelClass}`}>
                             <div className="flex items-center gap-2 mb-4 text-blue-600">
                                 <FileText size={20} />
                                 <h2 className="font-bold">粘贴数据区域</h2>
                             </div>
                             <p
-                                className="text-xs text-slate-400 mb-3 bg-slate-50 p-3 rounded-lg border border-dashed border-slate-200">
+                                className={`text-xs mb-3 p-3 rounded-lg border border-dashed ${darkMode ? 'text-slate-400 bg-slate-900 border-slate-600' : 'text-slate-400 bg-slate-50 border-slate-200'}`}>
                                 格式：邮箱——密码——恢复邮箱——2FA密钥——备注(可选)
                             </p>
                             <textarea
-                                className="w-full h-80 px-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm resize-none"
+                                className={`w-full h-80 px-4 py-4 border rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm resize-none ${inputClass}`}
                                 placeholder="example@gmail.com——password123——recovery@example.com——ABCD1234EFGH5678IJKL"
                                 value={text} onChange={(e) => handleParse(e.target.value)}
                             />
                         </div>
                         <div className="flex gap-4">
-                            <button onClick={onCancel} className="flex-1 py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold hover:bg-slate-50 transition-all">
+                            <button onClick={onCancel} className={`flex-1 py-4 border rounded-2xl font-bold transition-all ${secondaryButtonClass}`}>
                                 返回列表
                             </button>
                             <button

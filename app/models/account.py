@@ -32,8 +32,8 @@ class Account(db.Model):
     remark = db.Column(db.String(255), nullable=True)
     status = db.Column(db.String(20), default='inactive')
     sold_status = db.Column(db.String(20), default='unsold')  # 出售状态: sold/unsold
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
     
     def to_dict(self):
         """

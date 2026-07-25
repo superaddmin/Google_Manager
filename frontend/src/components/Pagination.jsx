@@ -21,7 +21,8 @@ const Pagination = ({
     onPageChange,
     onPageSizeChange,
     hasNextPage,
-    hasPrevPage
+    hasPrevPage,
+    darkMode = false
 }) => {
     // 生成页码列表
     const getPageNumbers = () => {
@@ -71,11 +72,11 @@ const Pagination = ({
     const pageSizeOptions = [10, 20, 50];
 
     return (
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 px-6 py-4 bg-slate-50/50 border-t border-slate-100">
+        <div className={`flex flex-col sm:flex-row items-center justify-between gap-4 px-6 py-4 border-t ${darkMode ? 'bg-slate-900/50 border-slate-700' : 'bg-slate-50/50 border-slate-100'}`}>
             {/* 左侧：显示信息 */}
-            <div className="text-sm text-slate-500">
-                共 <span className="font-bold text-slate-700">{totalItems}</span> 条记录，
-                第 <span className="font-bold text-slate-700">{currentPage}</span> / {totalPages} 页
+            <div className={`text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                共 <span className={darkMode ? 'font-bold text-slate-200' : 'font-bold text-slate-700'}>{totalItems}</span> 条记录，
+                第 <span className={darkMode ? 'font-bold text-slate-200' : 'font-bold text-slate-700'}>{currentPage}</span> / {totalPages} 页
             </div>
 
             {/* 中间：页码导航 */}
@@ -85,8 +86,8 @@ const Pagination = ({
                     onClick={() => onPageChange(1)}
                     disabled={!hasPrevPage}
                     className={`p-2 rounded-lg transition-all ${hasPrevPage
-                        ? 'text-slate-600 hover:bg-slate-200 hover:text-blue-600'
-                        : 'text-slate-300 cursor-not-allowed'
+                        ? (darkMode ? 'text-slate-300 hover:bg-slate-700 hover:text-blue-400' : 'text-slate-600 hover:bg-slate-200 hover:text-blue-600')
+                        : (darkMode ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300 cursor-not-allowed')
                         }`}
                     title="首页"
                 >
@@ -98,8 +99,8 @@ const Pagination = ({
                     onClick={() => onPageChange(currentPage - 1)}
                     disabled={!hasPrevPage}
                     className={`p-2 rounded-lg transition-all ${hasPrevPage
-                        ? 'text-slate-600 hover:bg-slate-200 hover:text-blue-600'
-                        : 'text-slate-300 cursor-not-allowed'
+                        ? (darkMode ? 'text-slate-300 hover:bg-slate-700 hover:text-blue-400' : 'text-slate-600 hover:bg-slate-200 hover:text-blue-600')
+                        : (darkMode ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300 cursor-not-allowed')
                         }`}
                     title="上一页"
                 >
@@ -110,7 +111,7 @@ const Pagination = ({
                 <div className="flex items-center gap-1 mx-2">
                     {getPageNumbers().map((page, index) =>
                         page === '...' ? (
-                            <span key={`ellipsis-${index}`} className="px-2 text-slate-400">
+                            <span key={`ellipsis-${index}`} className={darkMode ? 'px-2 text-slate-500' : 'px-2 text-slate-400'}>
                                 ...
                             </span>
                         ) : (
@@ -119,7 +120,7 @@ const Pagination = ({
                                 onClick={() => onPageChange(page)}
                                 className={`min-w-[36px] h-9 px-3 rounded-lg font-medium transition-all ${page === currentPage
                                     ? 'bg-blue-600 text-white shadow-md shadow-blue-200'
-                                    : 'text-slate-600 hover:bg-slate-200 hover:text-blue-600'
+                                    : (darkMode ? 'text-slate-300 hover:bg-slate-700 hover:text-blue-400' : 'text-slate-600 hover:bg-slate-200 hover:text-blue-600')
                                     }`}
                             >
                                 {page}
@@ -133,8 +134,8 @@ const Pagination = ({
                     onClick={() => onPageChange(currentPage + 1)}
                     disabled={!hasNextPage}
                     className={`p-2 rounded-lg transition-all ${hasNextPage
-                        ? 'text-slate-600 hover:bg-slate-200 hover:text-blue-600'
-                        : 'text-slate-300 cursor-not-allowed'
+                        ? (darkMode ? 'text-slate-300 hover:bg-slate-700 hover:text-blue-400' : 'text-slate-600 hover:bg-slate-200 hover:text-blue-600')
+                        : (darkMode ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300 cursor-not-allowed')
                         }`}
                     title="下一页"
                 >
@@ -146,8 +147,8 @@ const Pagination = ({
                     onClick={() => onPageChange(totalPages)}
                     disabled={!hasNextPage}
                     className={`p-2 rounded-lg transition-all ${hasNextPage
-                        ? 'text-slate-600 hover:bg-slate-200 hover:text-blue-600'
-                        : 'text-slate-300 cursor-not-allowed'
+                        ? (darkMode ? 'text-slate-300 hover:bg-slate-700 hover:text-blue-400' : 'text-slate-600 hover:bg-slate-200 hover:text-blue-600')
+                        : (darkMode ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300 cursor-not-allowed')
                         }`}
                     title="末页"
                 >
@@ -156,12 +157,12 @@ const Pagination = ({
             </div>
 
             {/* 右侧：每页条数选择 */}
-            <div className="flex items-center gap-2 text-sm text-slate-500">
+            <div className={`flex items-center gap-2 text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                 <span>每页</span>
                 <select
                     value={pageSize}
                     onChange={(e) => onPageSizeChange(Number(e.target.value))}
-                    className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 font-medium focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer"
+                    className={`px-3 py-1.5 border rounded-lg font-medium focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer ${darkMode ? 'bg-slate-800 border-slate-600 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}
                 >
                     {pageSizeOptions.map(size => (
                         <option key={size} value={size}>{size} 条</option>

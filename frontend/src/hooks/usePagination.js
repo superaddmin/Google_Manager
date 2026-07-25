@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 
 /**
  * 分页逻辑 Hook
@@ -16,7 +16,7 @@ const usePagination = (data, initialPageSize = 10) => {
     }, [data.length, pageSize]);
 
     // 当数据或每页条数变化时，确保当前页有效
-    useMemo(() => {
+    useEffect(() => {
         if (currentPage > totalPages) {
             setCurrentPage(Math.max(1, totalPages));
         }
