@@ -34,6 +34,7 @@ googlemail/.codex/**/*.sqlite-*
 # Logs and editor metadata
 *.log
 .playwright-mcp/
+.playwright-cli/
 /googlemail-*.png
 .idea/
 .vscode/
