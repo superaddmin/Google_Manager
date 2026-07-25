@@ -206,9 +206,9 @@ try {
 }
 ```
 
-### 5.2 实际运行
+### 5.2 独立 CLI 运行
 
-Googlemail 当前唯一稳定界面是 CLI：
+除主页集成入口外，Googlemail 仍保留独立 CLI，供本地维护和排障使用：
 
 ```powershell
 Push-Location F:\Google_Manager\googlemail
@@ -229,9 +229,9 @@ try {
 - 输出：仅返回任务状态、总数、完成/失败/待处理/同步/人工复核计数和脱敏错误码。
 - 工作目录：固定为 `F:\Google_Manager\googlemail`。
 - 运行目录：`googlemail/runtime/tasks/<task-id>/`，由 Git 忽略。
-- 生命周期：启动、查询、取消、最长运行时间、进程退出码和最近任务内存状态。
+- 生命周期：启动、查询、取消、最长运行时间、Windows 进程树终止、进程退出码和最近任务内存状态。
 - 并发：同一 Flask 进程只允许一个 Googlemail 任务运行，避免共用浏览器数据冲突。
-- 结果同步：成功结果只在服务端读取，并将新 2FA 密钥及已确认恢复邮箱写回账号历史。
+- 结果同步：成功结果只在服务端读取，并将新 2FA 密钥及已确认恢复邮箱写回账号历史；任务进入终态时清理包含密码与密钥的结果文件。
 - 敏感数据：密码、TOTP 密钥、Cookie、截图、子进程输出和结果文件不通过 HTTP 或 Flask 日志返回。
 - testing 配置：`GOOGLEMAIL_EXECUTION_ENABLED=False`，用于本地审核时阻止真实任务。
 
@@ -294,6 +294,14 @@ node --test .\tests\googlemail-local-copy.test.mjs
 - Windows ESM 使用 `pathToFileURL()` 正确导入。
 - 使用有效的 20 字节 Base32 固定样例生成 6 位 TOTP。
 - 使用临时合成文件调用实际导出的 `parseAccounts(filePath)`。
+
+### 6.4 Flask 与适配器测试
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
+```
+
+该测试覆盖账号 API、登录会话、testing 执行保护、Googlemail 成功同步、注册进程前取消、超时、非零退出清理和 Windows 进程树终止。
 
 ---
 

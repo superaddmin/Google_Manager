@@ -1,3 +1,4 @@
+import os
 import re
 import time
 import unittest
@@ -37,6 +38,11 @@ class ApiTestCase(unittest.TestCase):
     @staticmethod
     def current_salt():
         return AuthService.generate_salt(int(time.time()))
+
+    def test_production_requires_explicit_secret_key(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "SECRET_KEY"):
+                create_app("production")
 
     def create_account(self, email="user@example.test", **overrides):
         payload = {

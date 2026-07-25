@@ -280,6 +280,10 @@ class GooglemailTaskManager:
         timer = None
         try:
             with self._lock:
+                if record.cancel_requested:
+                    record.status = 'cancelled'
+                    record.error_code = 'TASK_CANCELLED'
+                    return
                 record.status = 'running'
                 record.started_at = _iso_now()
 
@@ -311,6 +315,10 @@ class GooglemailTaskManager:
             )
             with self._lock:
                 record.process = process
+                cancel_requested = record.cancel_requested
+
+            if cancel_requested and process.poll() is None:
+                self._terminate_process(process)
 
             timer = threading.Timer(
                 record.options['maxRuntimeMinutes'] * 60,
@@ -355,10 +363,14 @@ class GooglemailTaskManager:
                 record.process = None
                 record.finished_at = _iso_now()
                 self._refresh_counts(record)
-            try:
-                record.input_file.unlink()
-            except OSError:
-                pass
+            for sensitive_file in (
+                record.input_file,
+                record.output_dir / 'result.txt',
+            ):
+                try:
+                    sensitive_file.unlink()
+                except OSError:
+                    pass
 
     def _sync_results(self, app, record):
         result_file = record.output_dir / 'result.txt'
@@ -447,8 +459,23 @@ class GooglemailTaskManager:
 
     @staticmethod
     def _terminate_process(process):
+        tree_terminated = False
+        if os.name == 'nt' and getattr(process, 'pid', None):
+            try:
+                result = subprocess.run(
+                    ['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+                tree_terminated = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
         try:
-            process.terminate()
+            if not tree_terminated:
+                process.terminate()
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()

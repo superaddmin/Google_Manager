@@ -3,6 +3,7 @@ Flask 应用配置模块
 包含开发、生产和测试环境的配置
 """
 import os
+import secrets
 from datetime import timedelta
 
 # 获取项目根目录
@@ -11,7 +12,7 @@ basedir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
 class Config:
     """基础配置类"""
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
+    SECRET_KEY = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
     PERMANENT_SESSION_LIFETIME = timedelta(days=7)
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
@@ -31,6 +32,8 @@ class DevelopmentConfig(Config):
 class ProductionConfig(Config):
     """生产环境配置"""
     DEBUG = False
+    SECRET_KEY = os.environ.get('SECRET_KEY')
+    SESSION_COOKIE_SECURE = True
     
 
 class TestingConfig(Config):

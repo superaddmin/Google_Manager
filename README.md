@@ -186,9 +186,17 @@ ADMIN_PASSWORD = "你的新密码"
 app.run(host='0.0.0.0', port=8002)  # 修改 port 值
 ```
 
+### 配置生产会话密钥
+
+production 配置要求通过环境变量提供随机会话密钥，缺少时应用会停止启动：
+
+```powershell
+$env:SECRET_KEY = '<RANDOM_SECRET>'
+```
+
 ### 修改登录有效期
 
-编辑 `frontend/src/App.jsx`：
+同步修改 `app/config.py` 的 `PERMANENT_SESSION_LIFETIME` 与 `frontend/src/App.jsx` 的本地登录时间：
 
 ```javascript
 const sevenDaysMs = 7 * 24 * 60 * 60 * 1000; // 修改为你需要的天数

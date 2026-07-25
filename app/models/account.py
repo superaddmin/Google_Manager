@@ -2,8 +2,13 @@
 账号数据模型
 定义谷歌账号的数据库结构
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from app import db
+
+
+def utc_now():
+    """返回与现有 SQLite 字段兼容的 UTC 无时区时间。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Account(db.Model):
@@ -32,8 +37,8 @@ class Account(db.Model):
     remark = db.Column(db.String(255), nullable=True)
     status = db.Column(db.String(20), default='inactive')
     sold_status = db.Column(db.String(20), default='unsold')  # 出售状态: sold/unsold
-    created_at = db.Column(db.DateTime, default=datetime.now)
-    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = db.Column(db.DateTime, default=utc_now)
+    updated_at = db.Column(db.DateTime, default=utc_now, onupdate=utc_now)
     
     def to_dict(self):
         """

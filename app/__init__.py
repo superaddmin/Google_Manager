@@ -28,7 +28,11 @@ def create_app(config_name=None):
     # 加载配置
     from app.config import config
     config_name = config_name or os.environ.get('FLASK_ENV', 'development')
+    if config_name == 'production' and not os.environ.get('SECRET_KEY'):
+        raise RuntimeError('生产环境必须设置 SECRET_KEY')
     app.config.from_object(config[config_name])
+    if config_name == 'production':
+        app.config['SECRET_KEY'] = os.environ['SECRET_KEY']
     
     # 初始化扩展
     db.init_app(app)
