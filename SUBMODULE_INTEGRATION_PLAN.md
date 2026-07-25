@@ -1,824 +1,428 @@
-# Googlemail 子模块集成执行计划
+# Googlemail 本地复制集成执行计划
 
-> **主项目**: Google_Manager (Flask + React 账号管理系统)  
-> **子模块**: Googlemail (Node.js + Playwright Google 账号安全自动化工具)  
-> **目标路径**: `F:\Google_Manager\googlemail`  
-> **制定日期**: 2026-07-25
-
----
-
-## 目录
-
-1. [环境准备与兼容性检查](#1-环境准备与兼容性检查)
-2. [子模块添加流程](#2-子模块添加流程)
-3. [版本控制策略](#3-版本控制策略)
-4. [集成测试方案](#4-集成测试方案)
-5. [异常处理与回滚机制](#5-异常处理与回滚机制)
-6. [文档记录要求](#6-文档记录要求)
+> **主项目**：`F:\Google_Manager`（Flask + React）
+> **本地源目录**：`F:\Googlemail`（Node.js + Playwright）
+> **集成目录**：`F:\Google_Manager\googlemail`
+> **集成方式**：受控本地复制（vendored source），不是 Git submodule
+> **修订日期**：2026-07-25
 
 ---
 
-## 1. 环境准备与兼容性检查
+## 1. 决策与范围
 
-### 1.1 前置条件确认
+### 1.1 集成决策
 
-| 检查项 | 要求 | 验证命令 |
-|--------|------|----------|
-| Git | >= 2.20 | `git --version` |
-| Node.js | >= 20.19.0（子模块要求） | `node --version` |
-| npm | >= 9.x（随 Node.js 自带） | `npm --version` |
-| Python | >= 3.8（主项目后端） | `python --version` |
-| 磁盘空间 | >= 2GB（含 node_modules） | 检查 `F:\` 可用空间 |
+- `F:\Googlemail` 是本机已有源码快照，不为其创建远端仓库。
+- Googlemail 以普通目录复制到主项目的 `googlemail/`，由主项目 Git 直接跟踪。
+- 不创建 `.gitmodules`，不执行 `git submodule add/init/update`。
+- 不把 `googlemail/` 整体加入父仓库 `.gitignore`。
+- 每次同步都从 `F:\Googlemail` 受控复制，并审查主项目中的 Git 差异。
 
-### 1.2 兼容性检查步骤
+### 1.2 本阶段范围
+
+本阶段完成源码级集成：
+
+1. 复制 Googlemail 的源码、测试、文档、锁文件和项目级规则。
+2. 排除账号源文件、浏览器会话、运行输出、日志、覆盖率和依赖目录。
+3. 让复制后的 Googlemail 在主项目内独立安装、测试和启动检查。
+4. 提供父仓库级本地复制集成测试。
+
+本阶段不声称 Flask 已经调用 Googlemail，也不新增 HTTP 接口。实际运行仍以 Googlemail CLI 为唯一操作界面；后续若需要从 Flask 触发任务，应另行设计子进程适配器和任务状态协议。
+
+### 1.3 成功标准
+
+- `googlemail/` 是普通 Git 目录，不是 gitlink。
+- 敏感路径和本地运行产物不进入 Git 索引。
+- `npm ci`、47 项现有单元测试、覆盖率命令和 Chromium 启动检查通过。
+- 父仓库集成测试可在 Windows 下正确导入 Googlemail ESM 模块。
+- 新机器只需克隆主项目，不需要递归初始化子模块。
+
+---
+
+## 2. 当前基线
+
+| 检查项 | 当前状态 |
+| --- | --- |
+| 主项目 Git | 已初始化，分支为 `main` |
+| 主项目远端 | `superaddmin/main` |
+| 本地源目录 | `F:\Googlemail`，不是 Git 仓库 |
+| Node.js | `v24.15.0`，满足 `>=20.19.0` |
+| npm | `11.12.1` |
+| Googlemail 单元测试 | 6 个文件、47 项通过 |
+| Chromium 启动检查 | 通过，仅加载本地 `data:` 页面 |
+| 源锁文件 SHA-256 | `4C8148FD863BC597AE290A0C6D666FC49E4B520B53635EA7D7E4E157249C9569` |
+
+---
+
+## 3. 复制边界
+
+### 3.1 纳入主项目
+
+| 路径 | 用途 |
+| --- | --- |
+| `src/` | Googlemail 实现 |
+| `tests/` | Vitest 单元测试 |
+| `docs/` | 架构、配置和使用文档 |
+| `package.json` | Node.js 项目定义 |
+| `package-lock.json` | 依赖锁定 |
+| `vitest.config.mjs` | 测试配置 |
+| `.gitignore` | Googlemail 自身忽略规则 |
+| `README.md`、`AGENTS.md` | 使用说明和项目规则 |
+| `.codex/` | Googlemail 项目级规则、代理和技能配置 |
+
+### 3.2 必须排除
+
+| 路径或模式 | 原因 |
+| --- | --- |
+| `node_modules/` | 可重建依赖 |
+| `browser-data/` | Cookie、会话和浏览器缓存 |
+| `output/` | 账号处理结果、TOTP 密钥、日志和截图 |
+| `coverage/` | 测试产物 |
+| `test-results/`、`playwright-report/`、`test-temp-*/` | 测试产物 |
+| `宝贝信息-*.txt` | 账号、密码、恢复邮箱和旧 TOTP 密钥 |
+| `.env`、`.env.*` | 本地环境变量 |
+| `*.log` | 运行日志 |
+| `*.sqlite*` | 本地状态数据库 |
+| 子项目 `.git/` | 避免嵌套仓库 |
+
+父仓库和 `googlemail/.gitignore` 都应保留上述保护规则。敏感文件即使被忽略，也不应复制到集成目录。
+
+---
+
+## 4. 执行步骤
+
+### 4.1 预检
 
 ```powershell
-# 步骤 1：检查 Git 版本
-git --version
-# 预期输出: git version 2.xx.x 或更高
+cd F:\Google_Manager
 
-# 步骤 2：检查 Node.js 版本（子模块要求 >= 20.19.0）
+git status --short --branch
 node --version
-# 预期输出: v20.19.0 或更高
-
-# 步骤 3：检查 npm 版本
 npm --version
 
-# 步骤 4：检查 Python 版本（主项目后端）
-python --version
-# 预期输出: Python 3.8.x 或更高
+$source = (Resolve-Path -LiteralPath 'F:\Googlemail').Path
+$root = (Resolve-Path -LiteralPath 'F:\Google_Manager').Path
+$destination = Join-Path $root 'googlemail'
 
-# 步骤 5：验证子模块依赖可安装（在 F:\Googlemail 目录下）
-cd F:\Googlemail
-npm ci --dry-run 2>&1
-# 检查是否有依赖冲突错误
-
-# 步骤 6：验证子模块测试可运行
-npx vitest run --reporter=verbose 2>&1
+if (-not $destination.StartsWith(
+    $root + [System.IO.Path]::DirectorySeparatorChar,
+    [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "目标目录越界: $destination"
+}
 ```
 
-### 1.3 兼容性检查清单
+### 4.2 首次受控复制
 
-| # | 检查项目 | 状态 | 备注 |
-|---|---------|------|------|
-| 1 | Git 版本 >= 2.20 | ☐ | |
-| 2 | Node.js >= 20.19.0 | ☐ | 子模块 `package.json` `engines` 字段要求 |
-| 3 | Python >= 3.8 | ☐ | 主项目后端依赖 |
-| 4 | npm ci 依赖安装无报错 | ☐ | |
-| 5 | vitest 测试全部通过 | ☐ | |
-| 6 | 磁盘空间充足 | ☐ | |
-
----
-
-## 2. 子模块添加流程
-
-### 2.1 阶段一：初始化 Git 仓库
-
-两个项目目录当前均**未初始化**为 Git 仓库，需要先分别初始化。
-
-#### 2.1.1 初始化子模块仓库 (F:\Googlemail)
+首次复制前目标目录应不存在。命令不使用 `/MIR` 或 `/PURGE`，避免隐式删除目标文件。
 
 ```powershell
-cd F:\Googlemail
+if (Test-Path -LiteralPath $destination) {
+    throw "目标目录已存在，请按第 8 节执行增量同步"
+}
 
-# 1. 初始化 Git 仓库
-git init
+New-Item -ItemType Directory -Path $destination | Out-Null
 
-# 2. 配置用户信息（如未全局配置）
-git config user.name "GoogleManager-Bot"
-git config user.email "bot@google-manager.local"
+robocopy $source $destination /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NP `
+    /XD '.git' 'node_modules' 'browser-data' 'output' 'coverage' `
+        'test-results' 'playwright-report' 'test-temp-*' `
+        '.codex\tmp' '.codex\.tmp' `
+    /XF '.env' '.env.*' '宝贝信息-*.txt' '*.log' '*.sqlite' '*.sqlite-*'
 
-# 3. 确认 .gitignore 已存在且内容正确
-# 关键忽略项：node_modules/、browser-data/、output/、.env、.env.*、*.log、coverage/
-# 当前 .gitignore 已包含以上所有敏感路径，无需修改
-
-# 4. 添加所有非忽略文件到暂存区
-git add .
-
-# 5. 确认暂存区不包含敏感文件
-git status
-# 检查：不应包含 browser-data/、output/、.env、node_modules/ 等
-
-# 6. 创建初始提交
-git commit -m "feat: initial commit - Google 2FA automation tool
-
-- Node.js + Playwright 自动化修改 Google 账号两步验证
-- 支持 TOTP 验证码生成与验证
-- 包含完整的单元测试套件（vitest）
-- 要求 Node.js >= 20.19.0"
-
-# 7. 创建主分支（如默认不是 main）
-git branch -M main
+$copyExitCode = $LASTEXITCODE
+if ($copyExitCode -ge 8) {
+    throw "robocopy 失败，退出码: $copyExitCode"
+}
 ```
 
-#### 2.1.2 初始化主项目仓库 (F:\Google_Manager)
+Robocopy 的 `0-7` 均属于成功或存在可接受差异，`8` 及以上才是失败。
+
+### 4.3 调整复制后的本地路径
+
+Googlemail 的项目级配置和文档必须使用集成后的路径：
+
+```text
+F:\Google_Manager\googlemail
+F:/Google_Manager/googlemail
+```
+
+修改后检查旧路径已经清除：
 
 ```powershell
-cd F:\Google_Manager
-
-# 1. 初始化 Git 仓库
-git init
-
-# 2. 配置用户信息
-git config user.name "GoogleManager-Bot"
-git config user.email "bot@google-manager.local"
-
-# 3. 创建 .gitignore 文件（如不存在）
-# 见下方 .gitignore 模板
-
-# 4. 添加所有文件
-git add .
-
-# 5. 创建初始提交
-git commit -m "feat: initial commit - Google account manager system
-
-- Flask + React 前后端分离架构
-- 账号批量导入/管理/搜索
-- TOTP 2FA 验证码生成
-- 出售状态管理与修改历史追踪"
-
-# 6. 创建主分支
-git branch -M main
+rg -n 'F:\\Googlemail|F:/Googlemail|f:\\Googlemail' googlemail --hidden
 ```
 
-#### 主项目 .gitignore 模板
+预期：无输出。
 
-若 `F:\Google_Manager` 下尚无 `.gitignore`，需创建：
+### 4.4 敏感路径检查
 
-```gitignore
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.egg-info/
-.eggs/
-venv/
-.venv/
-
-# 数据库
-instance/*.db
-
-# 环境变量
-.env
-.env.*
-
-# Node
-node_modules/
-
-# IDE
-.vscode/
-.idea/
-
-# 日志
-*.log
-
-# 子模块（将由 Git 自动管理）
-googlemail/
-```
-
-### 2.2 阶段二：添加子模块
+本检查应在首次复制完成、执行 `npm ci` 之前运行，用于确认复制命令没有带入源目录中的运行产物。安装和测试完成后，`node_modules/` 与 `coverage/` 可以在本地存在，但必须保持忽略且不进入 Git 索引。
 
 ```powershell
-cd F:\Google_Manager
-
-# 1. 添加 Googlemail 作为子模块
-# 使用本地路径（因为当前无远程仓库）
-git submodule add F:\Googlemail googlemail
-
-# 该命令会：
-# - 克隆 F:\Googlemail 到 F:\Google_Manager\googlemail\
-# - 在仓库根目录创建 .gitmodules 文件
-# - 将子模块信息记录到 .git/config
-
-# 2. 验证子模块添加成功
-git submodule status
-# 预期输出: <commit-hash> googlemail (heads/main)
-
-# 3. 查看生成的 .gitmodules 文件
-cat .gitmodules
-```
-
-### 2.3 阶段三：子模块初始化与验证
-
-```powershell
-# 1. 初始化子模块（克隆后首次需要）
-git submodule init
-
-# 2. 更新子模块到记录的提交
-git submodule update
-
-# 3. 进入子模块目录，安装依赖
-cd googlemail
-npm ci
-
-# 4. 运行子模块测试验证功能正常
-npm test
-
-# 5. 返回主项目目录
-cd ..
-```
-
-### 2.4 阶段四：提交子模块配置
-
-```powershell
-cd F:\Google_Manager
-
-# 1. 查看变更
-git status
-# 预期变更：
-# - .gitmodules (新文件)
-# - googlemail (新子模块)
-
-# 2. 提交子模块配置
-git add .gitmodules googlemail
-git commit -m "feat: add Googlemail as a git submodule
-
-- 集成 Google 2FA 自动化工具作为 googlemail/ 子模块
-- 提供 TOTP 验证码生成与账号安全设置自动化能力
-- 子模块路径: googlemail/"
-```
-
-### 2.5 完整操作流程总结
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  阶段一：初始化 Git 仓库                                        │
-│  ├─ F:\Googlemail:   git init → git add → git commit         │
-│  └─ F:\Google_Manager: git init → git add → git commit       │
-├─────────────────────────────────────────────────────────────┤
-│  阶段二：添加子模块                                            │
-│  └─ git submodule add F:\Googlemail googlemail              │
-├─────────────────────────────────────────────────────────────┤
-│  阶段三：子模块初始化                                          │
-│  ├─ git submodule init                                       │
-│  ├─ git submodule update                                     │
-│  └─ cd googlemail && npm ci && npm test                      │
-├─────────────────────────────────────────────────────────────┤
-│  阶段四：提交配置                                              │
-│  └─ git add → git commit                                     │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 3. 版本控制策略
-
-### 3.1 分支策略
-
-#### 主项目分支
-
-| 分支名 | 用途 | 说明 |
-|--------|------|------|
-| `main` | 稳定发布分支 | 始终保持可运行状态 |
-| `develop` | 开发分支 | 日常开发集成 |
-| `feature/*` | 功能分支 | 新功能开发，合并到 develop |
-| `hotfix/*` | 紧急修复 | 修复线上问题，合并到 main 和 develop |
-
-#### 子模块分支
-
-| 分支名 | 用途 | 说明 |
-|--------|------|------|
-| `main` | 稳定版本 | 主项目 submodule 跟踪此分支 |
-| `develop` | 开发版本 | 功能开发与测试 |
-
-### 3.2 子模块跟踪策略
-
-```powershell
-# 让子模块跟踪特定分支（推荐跟踪 main 稳定分支）
-cd F:\Google_Manager
-git config -f .gitmodules submodule.googlemail.branch main
-```
-
-配置后 `.gitmodules` 内容示例：
-
-```ini
-[submodule "googlemail"]
-    path = googlemail
-    url = F:\Googlemail
-    branch = main
-```
-
-### 3.3 提交规范
-
-采用 [Conventional Commits](https://www.conventionalcommits.org/) 规范：
-
-| 类型 | 说明 | 示例 |
-|------|------|------|
-| `feat` | 新功能 | `feat: 集成 Googlemail 子模块自动化能力` |
-| `fix` | Bug 修复 | `fix: 修复子模块路径引用错误` |
-| `chore` | 维护性工作 | `chore(submodule): 更新 googlemail 到 v1.1.0` |
-| `docs` | 文档更新 | `docs: 更新子模块使用说明` |
-| `test` | 测试相关 | `test: 添加子模块集成测试` |
-| `refactor` | 重构 | `refactor: 调整子模块调用接口` |
-
-**子模块更新提交格式**：
-
-```
-chore(submodule): update googlemail to <commit-hash>
-
-- 更新到 googlemail@v1.1.0
-- 修复 TOTP 验证超时问题
-- 新增批量账号处理支持
-```
-
-### 3.4 子模块更新机制
-
-#### 3.4.1 更新子模块到最新版本
-
-```powershell
-# 方式一：更新到子模块 main 分支最新提交
-cd F:\Google_Manager\googlemail
-git pull origin main
-cd ..
-git add googlemail
-git commit -m "chore(submodule): update googlemail to latest main"
-
-# 方式二：更新到特定提交
-cd googlemail
-git checkout <commit-hash>
-cd ..
-git add googlemail
-git commit -m "chore(submodule): pin googlemail to <commit-hash>"
-```
-
-#### 3.4.2 更新频率
-
-| 场景 | 频率 | 说明 |
-|------|------|------|
-| 安全修复 | 即时 | 子模块安全漏洞修复后立即更新 |
-| 功能更新 | 按需 | 主项目需要新功能时更新 |
-| 定期同步 | 每月 | 检查子模块是否有重要更新 |
-
-#### 3.4.3 克隆含子模块的项目
-
-```powershell
-# 首次克隆（含子模块）
-git clone --recurse-submodules <repo-url>
-
-# 或克隆后初始化子模块
-git clone <repo-url>
-cd Google_Manager
-git submodule init
-git submodule update
-```
-
----
-
-## 4. 集成测试方案
-
-### 4.1 测试层次
-
-```
-┌─────────────────────────────────────┐
-│          集成测试 (Integration)       │
-│  主项目调用子模块的接口正确性验证       │
-├─────────────────────────────────────┤
-│         功能测试 (Functional)         │
-│  子模块在嵌入路径下的功能完整性验证     │
-├─────────────────────────────────────┤
-│         冒烟测试 (Smoke)              │
-│  子模块基本可运行性验证               │
-└─────────────────────────────────────┘
-```
-
-### 4.2 冒烟测试（快速验证）
-
-```powershell
-# 测试 1：子模块目录完整性
-cd F:\Google_Manager\googlemail
-ls src/       # 应包含所有 .mjs 源文件
-ls tests/     # 应包含所有 .test.mjs 测试文件
-ls package.json  # 应存在
-
-# 测试 2：依赖安装
-npm ci
-# 预期：无错误退出
-
-# 测试 3：启动检查
-npm run test:startup
-# 预期：Chromium 启动成功，不访问 Google 页面
-
-# 测试 4：基本功能验证
-npm test
-# 预期：所有 vitest 单元测试通过
-```
-
-### 4.3 功能测试（子模块完整性）
-
-```powershell
-# 测试 1：单元测试覆盖率
-npm run test:coverage
-# 预期：覆盖率报告正常生成
-
-# 测试 2：TOTP 模块功能
-node -e "
-import('./googlemail/src/totp.mjs').then(m => {
-  const code = m.generateTOTP('JBSWY3DPEHPK3PXP');
-  console.log('TOTP generated:', code);
-  console.log('Length valid:', code.length === 6);
-})"
-
-# 测试 3：账号解析模块
-node -e "
-import('./googlemail/src/account-parser.mjs').then(m => {
-  const result = m.parseAccountLine('test@gmail.com--password123--recovery@mail.com--SECRETKEY--note');
-  console.log('Parse result:', JSON.stringify(result, null, 2));
-})"
-
-# 测试 4：配置加载
-node -e "
-import('./googlemail/src/config.mjs').then(m => {
-  console.log('Config loaded successfully');
-})"
-```
-
-### 4.4 集成测试（主项目与子模块交互）
-
-在 `F:\Google_Manager\` 下创建集成测试脚本 `test_submodule_integration.mjs`：
-
-```javascript
-// test_submodule_integration.mjs
-// 主项目与 Googlemail 子模块集成测试
-
-import { describe, it, expect } from 'vitest';
-import { readFileSync, existsSync } from 'fs';
-import { resolve, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SUBMODULE_PATH = resolve(__dirname, 'googlemail');
-
-describe('Googlemail 子模块集成测试', () => {
-
-  it('子模块目录存在且结构完整', () => {
-    expect(existsSync(SUBMODULE_PATH)).toBe(true);
-    expect(existsSync(resolve(SUBMODULE_PATH, 'package.json'))).toBe(true);
-    expect(existsSync(resolve(SUBMODULE_PATH, 'src'))).toBe(true);
-    expect(existsSync(resolve(SUBMODULE_PATH, 'tests'))).toBe(true);
-  });
-
-  it('子模块 package.json 可解析', () => {
-    const pkg = JSON.parse(
-      readFileSync(resolve(SUBMODULE_PATH, 'package.json'), 'utf-8')
-    );
-    expect(pkg.name).toBe('google-2fa-tool');
-    expect(pkg.type).toBe('module');
-  });
-
-  it('子模块 Node.js 版本要求与当前环境兼容', () => {
-    const pkg = JSON.parse(
-      readFileSync(resolve(SUBMODULE_PATH, 'package.json'), 'utf-8')
-    );
-    const required = pkg.engines?.node || '>=18.0.0';
-    const current = process.version;
-    // 简单版本检查（生产环境建议使用 semver 库）
-    const requiredVer = required.replace(/[>=~\s]/g, '').split('.')[0];
-    const currentVer = parseInt(current.replace('v', '').split('.')[0]);
-    expect(currentVer).toBeGreaterThanOrEqual(parseInt(requiredVer));
-  });
-
-  it('子模块核心源文件存在', () => {
-    const requiredFiles = [
-      'main.mjs', 'account-parser.mjs', 'config.mjs',
-      'google-automator.mjs', 'totp.mjs', 'verify-2fa.mjs',
-      'startup-check.mjs', 'test-login.mjs', 'redaction.mjs'
-    ];
-    for (const file of requiredFiles) {
-      expect(existsSync(resolve(SUBMODULE_PATH, 'src', file))).toBe(true);
+$unexpectedCopiedPaths = @(
+    'googlemail\node_modules',
+    'googlemail\browser-data',
+    'googlemail\output',
+    'googlemail\coverage'
+)
+
+foreach ($path in $unexpectedCopiedPaths) {
+    if (Test-Path -LiteralPath $path) {
+        throw "首次复制带入了运行时路径: $path"
     }
-  });
+}
 
-  it('子模块测试文件存在', () => {
-    const requiredTests = [
-      'account-parser.test.mjs', 'config.test.mjs',
-      'google-automator.test.mjs', 'totp.test.mjs',
-      'verify-2fa.test.mjs', 'redaction.test.mjs'
-    ];
-    for (const file of requiredTests) {
-      expect(existsSync(resolve(SUBMODULE_PATH, 'tests', file))).toBe(true);
+$sensitiveFiles = Get-ChildItem -Force googlemail -Recurse -File |
+    Where-Object {
+        $_.Name -match '^\.env' -or
+        $_.Name -match '\.log$' -or
+        $_.Name -match '\.sqlite' -or
+        $_.Name -match '^宝贝信息-'
     }
-  });
 
-  it('子模块 .gitignore 包含敏感路径', () => {
-    const gitignore = readFileSync(
-      resolve(SUBMODULE_PATH, '.gitignore'), 'utf-8'
-    );
-    expect(gitignore).toContain('browser-data');
-    expect(gitignore).toContain('output');
-    expect(gitignore).toContain('.env');
-    expect(gitignore).toContain('node_modules');
-  });
-
-  it('子模块文档目录存在', () => {
-    expect(existsSync(resolve(SUBMODULE_PATH, 'docs'))).toBe(true);
-    expect(existsSync(resolve(SUBMODULE_PATH, 'docs', 'README.md'))).toBe(true);
-  });
-
-  it('TOTP 模块可导入且正常工作', async () => {
-    const totp = await import(resolve(SUBMODULE_PATH, 'src/totp.mjs'));
-    expect(typeof totp.generateTOTP).toBe('function');
-    const code = totp.generateTOTP('JBSWY3DPEHPK3PXP');
-    expect(code).toMatch(/^\d{6}$/);
-  });
-
-  it('账号解析模块可导入且正常工作', async () => {
-    const parser = await import(
-      resolve(SUBMODULE_PATH, 'src/account-parser.mjs')
-    );
-    expect(typeof parser.parseAccountLine).toBe('function');
-    const result = parser.parseAccountLine(
-      'test@gmail.com--password123--recovery@mail.com--SECRETKEY--note'
-    );
-    expect(result).toBeDefined();
-  });
-});
-```
-
-运行集成测试：
-
-```powershell
-cd F:\Google_Manager
-npx vitest run test_submodule_integration.mjs
-```
-
-### 4.5 测试通过标准
-
-| 测试类别 | 通过标准 |
-|---------|---------|
-| 冒烟测试 | 全部 4 项通过 |
-| 功能测试 | 全部 4 项通过，子模块单元测试 100% 通过 |
-| 集成测试 | 全部 9 项通过 |
-
----
-
-## 5. 异常处理与回滚机制
-
-### 5.1 异常场景与处理方案
-
-#### 场景 A：Git 初始化失败
-
-| 错误现象 | 可能原因 | 解决方案 |
-|---------|---------|---------|
-| `git: command not found` | Git 未安装 | 安装 Git for Windows，添加到 PATH |
-| `fatal: not a git repository` | 路径错误 | 确认 `cd` 到正确目录 |
-| 权限不足 | 目录权限问题 | 以管理员身份运行 PowerShell |
-
-#### 场景 B：子模块添加失败
-
-| 错误现象 | 可能原因 | 解决方案 |
-|---------|---------|---------|
-| `'F:\Googlemail' already exists in the index` | 已存在同名路径 | 删除已有目录，清理 git 缓存 |
-| `not a git repository` | 子模块仓库未初始化 | 先执行 `git init` 在 Googlemail 目录 |
-| 网络/路径不可达 | 源路径不存在 | 确认 `F:\Googlemail` 目录存在且可访问 |
-
-**恢复步骤**：
-
-```powershell
-# 如果子模块添加失败，清理残留
-cd F:\Google_Manager
-git submodule deinit -f googlemail        # 取消子模块注册
-git rm -f googlemail                       # 从索引中移除
-Remove-Item -Recurse -Force .git/modules/googlemail  # 清理 .git 缓存
-Remove-Item -Recurse -Force googlemail -ErrorAction SilentlyContinue  # 删除目录
-```
-
-#### 场景 C：版本冲突
-
-| 冲突类型 | 表现 | 解决策略 |
-|---------|------|---------|
-| 子模块提交不一致 | `git status` 显示 `modified: googlemail (new commits)` | 确认是否需要更新，执行 `git submodule update` 或提交新指针 |
-| Node.js 版本不兼容 | `npm ci` 报 engines 错误 | 升级 Node.js 到 >= 20.19.0，或使用 nvm 切换版本 |
-| 依赖冲突 | `npm ci` 报依赖冲突 | 删除 `node_modules` 和 `package-lock.json`，重新 `npm ci` |
-| 合并冲突 | `.gitmodules` 或子模块指针冲突 | 手动解决冲突，选择正确的子模块提交哈希 |
-
-#### 场景 D：子模块运行异常
-
-```powershell
-# 1. 检查子模块状态
-cd F:\Google_Manager
-git submodule status
-# 预期：开头无 '-' 号（已初始化），无 '+' 号（提交一致）
-
-# 2. 强制重新初始化子模块
-git submodule deinit -f googlemail
-git submodule update --init --recursive
-
-# 3. 重新安装依赖
-cd googlemail
-Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
-npm ci
-npm test
-
-# 4. 如仍有问题，检查 Playwright 浏览器
-npx playwright install chromium
-```
-
-### 5.2 回滚机制
-
-#### 5.2.1 完全回滚（移除子模块）
-
-```powershell
-cd F:\Google_Manager
-
-# 步骤 1：取消子模块注册
-git submodule deinit -f googlemail
-
-# 步骤 2：从 Git 索引中移除
-git rm -f googlemail
-
-# 步骤 3：清理 .git/modules 中的缓存
-Remove-Item -Recurse -Force .git/modules/googlemail
-
-# 步骤 4：删除物理目录
-Remove-Item -Recurse -Force googlemail -ErrorAction SilentlyContinue
-
-# 步骤 5：提交回滚
-git add .gitmodules
-git commit -m "revert: remove googlemail submodule"
-```
-
-#### 5.2.2 部分回滚（回退子模块版本）
-
-```powershell
-cd F:\Google_Manager\googlemail
-
-# 查看子模块提交历史
-git log --oneline -10
-
-# 回退到指定提交
-git checkout <target-commit-hash>
-
-# 返回主项目，更新指针
-cd ..
-git add googlemail
-git commit -m "chore(submodule): rollback googlemail to <target-commit-hash>"
-```
-
-#### 5.2.3 回滚检查清单
-
-| # | 检查项 | 状态 |
-|---|--------|------|
-| 1 | 确认回滚原因（功能异常/版本不兼容/安全漏洞） | ☐ |
-| 2 | 备份当前状态（`git stash` 或创建备份分支） | ☐ |
-| 3 | 执行回滚操作 | ☐ |
-| 4 | 验证回滚后状态（`git submodule status`） | ☐ |
-| 5 | 运行冒烟测试确认功能正常 | ☐ |
-| 6 | 提交回滚记录 | ☐ |
-
----
-
-## 6. 文档记录要求
-
-### 6.1 子模块结构说明
-
-在 `F:\Google_Manager\docs\` 目录下创建 `submodule-googlemail.md`：
-
-```markdown
-# Googlemail 子模块结构说明
-
-## 基本信息
-- **名称**: googlemail (google-2fa-tool)
-- **版本**: 1.0.0
-- **类型**: Node.js ESM 模块
-- **运行时**: Node.js >= 20.19.0
-- **路径**: googlemail/
-
-## 目录结构
-googlemail/
-├── src/                    # 源代码
-│   ├── main.mjs           # 主入口，自动化修改 2FA
-│   ├── account-parser.mjs  # 账号信息解析
-│   ├── config.mjs         # 配置管理
-│   ├── google-automator.mjs # Playwright 自动化核心
-│   ├── totp.mjs           # TOTP 验证码生成
-│   ├── verify-2fa.mjs     # 2FA 验证
-│   ├── startup-check.mjs   # 启动环境检查
-│   ├── test-login.mjs     # 登录测试
-│   └── redaction.mjs      # 敏感信息脱敏
-├── tests/                  # 单元测试
-├── docs/                   # 文档
-├── output/                 # 输出目录（.gitignore 忽略）
-├── browser-data/           # 浏览器数据（.gitignore 忽略）
-├── package.json
-└── vitest.config.mjs
-
-## 主要依赖
-- playwright: 1.60.0 — 浏览器自动化
-- otplib: 13.4.1 — TOTP 验证码
-- vitest: 4.1.10 — 测试框架
-
-## 与主项目的关系
-- 主项目提供账号数据管理（导入/搜索/状态管理）
-- 子模块提供账号 2FA 自动化修改能力
-- 主项目通过子模块暴露的 API 接口调用自动化功能
-```
-
-### 6.2 更新日志
-
-在 `F:\Google_Manager\CHANGELOG.md` 中记录子模块相关变更：
-
-```markdown
-# Changelog
-
-## 子模块变更
-
-| 日期 | 变更类型 | 描述 | 操作人 |
-|------|---------|------|--------|
-| 2026-07-25 | 新增 | 添加 googlemail 子模块 @ 初始提交 | - |
-| | | | |
-
-### 变更记录格式
-每次子模块更新时，按以下格式记录：
-
-| 日期 | 旧版本 | 新版本 | 变更内容 | 操作人 |
-|------|--------|--------|---------|--------|
-| YYYY-MM-DD | <old-hash> | <new-hash> | 变更说明 | 姓名 |
-```
-
-### 6.3 维护责任人
-
-| 角色 | 职责 | 联系方式 |
-|------|------|---------|
-| 主项目负责人 | 主项目整体维护，子模块集成决策 | TBD |
-| 子模块负责人 | Googlemail 功能开发与维护 | TBD |
-| 集成负责人 | 子模块版本管理、更新与测试 | TBD |
-
-### 6.4 文档清单
-
-| 文档 | 路径 | 内容 | 状态 |
-|------|------|------|------|
-| 执行计划 | `SUBMODULE_INTEGRATION_PLAN.md` | 本文档 | ☐ 已创建 |
-| 子模块结构说明 | `docs/submodule-googlemail.md` | 子模块架构与使用说明 | ☐ 待创建 |
-| 更新日志 | `CHANGELOG.md` | 子模块变更记录 | ☐ 待创建 |
-| 子模块 README | `googlemail/README.md` | 子模块自述（已存在） | ☑ 已有 |
-| 子模块文档 | `googlemail/docs/` | 架构/使用/配置指南（已存在） | ☑ 已有 |
-
-### 6.5 主项目 README 更新
-
-在 `README.md` 中新增子模块相关章节：
-
-```markdown
-## 📦 子模块
-
-本项目包含以下 Git 子模块：
-
-| 子模块 | 路径 | 说明 |
-|--------|------|------|
-| [Googlemail](googlemail/) | `googlemail/` | Google 账号 2FA 自动化修改工具 |
-
-### 克隆含子模块的项目
-
-```bash
-git clone --recurse-submodules <repo-url>
-```
-
-### 更新子模块
-
-```bash
-git submodule update --remote
-```
+if ($sensitiveFiles) {
+    $sensitiveFiles | Select-Object FullName
+    throw '集成目录包含敏感或运行时文件'
+}
 ```
 
 ---
 
-## 附录
+## 5. 本地操作界面
 
-### A. 命令速查表
+### 5.1 安装和验证
 
-| 操作 | 命令 |
-|------|------|
-| 查看子模块状态 | `git submodule status` |
-| 初始化子模块 | `git submodule init` |
-| 更新子模块 | `git submodule update` |
-| 更新到远程最新 | `git submodule update --remote` |
-| 递归更新所有子模块 | `git submodule update --init --recursive` |
-| 移除子模块 | 见 §5.2.1 |
-| 查看子模块日志 | `cd googlemail && git log` |
-| 查看子模块差异 | `git diff --submodule` |
+从父仓库执行时必须把工作目录切换到 `googlemail/`，因为当前实现使用 `process.cwd()` 定位账号文件、`output/` 和 `browser-data/`。
 
-### B. 风险矩阵
+```powershell
+cd F:\Google_Manager
+Push-Location .\googlemail
+try {
+    npm ci
+    npm test
+    npm run test:coverage
+    npm run test:startup
+} finally {
+    Pop-Location
+}
+```
 
-| 风险 | 影响 | 概率 | 缓解措施 |
-|------|------|------|---------|
-| Node.js 版本不兼容 | 子模块无法运行 | 中 | 预先版本检查，使用 nvm 管理 |
-| 子模块依赖安装失败 | 功能不可用 | 低 | npm ci 代替 npm install，锁定版本 |
-| 子模块与主项目路径冲突 | 构建失败 | 低 | 独立子目录，不共享依赖 |
-| 敏感文件泄露 | 安全风险 | 低 | .gitignore 多重检查，pre-commit hook |
-| 子模块更新引入 Breaking Change | 集成失败 | 中 | 锁定版本，更新前在测试分支验证 |
+### 5.2 实际运行
 
-### C. 执行时间线
+Googlemail 当前唯一稳定界面是 CLI：
 
-| 阶段 | 预计操作 | 依赖 |
-|------|---------|------|
-| 环境检查 | 10 分钟 | 无 |
-| Git 初始化 | 5 分钟 | 环境检查通过 |
-| 子模块添加 | 10 分钟 | Git 初始化完成 |
-| 集成测试 | 15 分钟 | 子模块添加完成 |
-| 文档更新 | 10 分钟 | 集成测试通过 |
-| **总计** | **约 50 分钟** | |
+```powershell
+Push-Location F:\Google_Manager\googlemail
+try {
+    npm start
+} finally {
+    Pop-Location
+}
+```
+
+`npm start` 和 `npm run test-login` 会读取本地账号文件并执行浏览器流程，不属于安装验证命令，也不应进入自动化 CI。
+
+### 5.3 后续 Flask 集成要求
+
+若后续需要由 Flask 调用，新增一个子进程适配器，并先定义以下接口事实：
+
+- 输入：任务 ID、账号文件路径和非敏感运行选项。
+- 输出：仅返回任务状态、计数和脱敏错误码。
+- 工作目录：固定为 `F:\Google_Manager\googlemail`。
+- 生命周期：启动、查询、取消、超时和进程退出码。
+- 敏感数据：密码、TOTP 密钥、Cookie、截图和结果文件不通过 Flask 日志返回。
+
+在该适配器落地前，文档不得声称主项目已经通过接口调用 Googlemail。
 
 ---
 
-> **文档版本**: v1.0  
-> **最后更新**: 2026-07-25  
-> **审核状态**: 待审核
+## 6. 验证方案
+
+### 6.1 Node.js 静态检查
+
+```powershell
+Get-ChildItem .\googlemail\src\*.mjs | ForEach-Object {
+    node --check $_.FullName
+    if ($LASTEXITCODE -ne 0) {
+        throw "语法检查失败: $($_.FullName)"
+    }
+}
+```
+
+### 6.2 Googlemail 自身测试
+
+```powershell
+Push-Location .\googlemail
+try {
+    npm ci
+    npm test
+    npm run test:coverage
+    npm run test:startup
+} finally {
+    Pop-Location
+}
+```
+
+通过标准：
+
+- 6 个测试文件、47 项测试全部通过。
+- 覆盖率命令正常生成报告；覆盖率数值作为基线记录，不写成“100% 覆盖”。
+- Chromium 启动检查只加载本地页面。
+
+### 6.3 父仓库集成测试
+
+父仓库使用 Node.js 内置测试器，不额外安装 Vitest：
+
+```powershell
+node --test .\tests\googlemail-local-copy.test.mjs
+```
+
+该测试负责验证：
+
+- 必要源码、锁文件、文档和测试文件存在。
+- Googlemail 忽略规则包含运行时与敏感路径。
+- Windows ESM 使用 `pathToFileURL()` 正确导入。
+- 使用有效的 20 字节 Base32 固定样例生成 6 位 TOTP。
+- 使用临时合成文件调用实际导出的 `parseAccounts(filePath)`。
+
+---
+
+## 7. Git 检查与提交
+
+### 7.1 暂存前检查
+
+```powershell
+git status --short
+git check-ignore -v --no-index `
+    googlemail/node_modules/ `
+    googlemail/browser-data/ `
+    googlemail/output/ `
+    googlemail/coverage/
+```
+
+### 7.2 暂存和索引检查
+
+```powershell
+git add .gitignore README.md SUBMODULE_INTEGRATION_PLAN.md googlemail tests\googlemail-local-copy.test.mjs
+
+$trackedSensitive = git ls-files googlemail |
+    Select-String -Pattern '(^|/)(node_modules|browser-data|output|coverage)/|(^|/)\.env|\.log$|\.sqlite|宝贝信息-'
+
+if ($trackedSensitive) {
+    $trackedSensitive
+    throw 'Git 索引包含禁止提交的 Googlemail 文件'
+}
+
+git diff --cached --check -- ':!README.md'
+
+$readmeBytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'README.md'))
+$readmeText = [System.Text.UTF8Encoding]::new($false, $true).GetString($readmeBytes)
+$readmeTrailingSpaces = [regex]::Matches(
+    $readmeText,
+    '[ \t]+(?=\r?$)',
+    [System.Text.RegularExpressions.RegexOptions]::Multiline
+)
+
+if ($readmeTrailingSpaces.Count -gt 0) {
+    throw 'README.md 包含行尾空格或制表符'
+}
+
+git diff --cached --stat
+git status --short
+```
+
+### 7.3 提交和推送
+
+```powershell
+git commit -m "feat: 以本地快照集成 Googlemail"
+git push superaddmin main
+```
+
+---
+
+## 8. 后续同步
+
+Googlemail 没有远端仓库，后续更新仍从 `F:\Googlemail` 同步。
+
+1. 确认父仓库工作区干净。
+2. 执行下方增量复制命令。
+3. 不使用 `/MIR` 或 `/PURGE`；源目录已删除的文件由维护者根据差异逐个 `git rm`。
+4. 重新应用第 4.3 节路径适配。
+5. 执行第 4.4、6、7 节全部检查。
+6. 在提交信息中记录源锁文件 SHA-256。
+
+建议每次同步先记录：
+
+```powershell
+Get-FileHash -Algorithm SHA256 F:\Googlemail\package-lock.json
+git status --short --branch
+
+$source = (Resolve-Path -LiteralPath 'F:\Googlemail').Path
+$destination = (Resolve-Path -LiteralPath 'F:\Google_Manager\googlemail').Path
+
+robocopy $source $destination /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NP `
+    /XD '.git' 'node_modules' 'browser-data' 'output' 'coverage' `
+        'test-results' 'playwright-report' 'test-temp-*' `
+        '.codex\tmp' '.codex\.tmp' `
+    /XF '.env' '.env.*' '宝贝信息-*.txt' '*.log' '*.sqlite' '*.sqlite-*'
+
+$copyExitCode = $LASTEXITCODE
+if ($copyExitCode -ge 8) {
+    throw "robocopy 失败，退出码: $copyExitCode"
+}
+```
+
+---
+
+## 9. 回滚
+
+### 9.1 已提交后的回滚
+
+优先使用可审计的 Git 回滚：
+
+```powershell
+git log --oneline -5
+git revert <LOCAL_COPY_INTEGRATION_COMMIT>
+git push superaddmin main
+```
+
+### 9.2 提交前中止
+
+先查看将被清理的文件，不直接执行递归删除：
+
+```powershell
+git status --short -- googlemail tests\googlemail-local-copy.test.mjs
+git clean -nd -- googlemail tests\googlemail-local-copy.test.mjs
+```
+
+确认目标严格等于 `F:\Google_Manager\googlemail`、且其中没有需要保留的工作后，再执行明确的清理操作。
+
+---
+
+## 10. 风险与控制
+
+| 风险 | 控制措施 |
+| --- | --- |
+| 本地源与集成副本漂移 | 每次同步记录锁文件哈希并审查 Git 差异 |
+| 敏感数据进入仓库 | 复制排除、双层 `.gitignore`、Git 索引负向检查 |
+| Windows ESM 路径导入失败 | 集成测试统一使用 `pathToFileURL()` |
+| CLI 在错误目录写入数据 | 所有运行命令显式切换到 `googlemail/` |
+| 更新时误删本地文件 | Robocopy 禁用 `/MIR` 和 `/PURGE`，删除逐项审查 |
+| 回滚破坏工作区 | 使用 `git revert`，清理前先 dry-run 和路径核验 |
+
+---
+
+## 11. 本次执行记录
+
+- [x] 已确认主项目为现有 Git 仓库，不重复初始化。
+- [x] 已采用本地复制，不创建 `.gitmodules`。
+- [x] 已排除依赖、账号文件、浏览器数据、输出、日志和环境变量。
+- [x] 已把复制后的项目级路径调整到 `F:\Google_Manager\googlemail`。
+- [x] 已安装复制目录依赖。
+- [x] 已通过 Googlemail 单元测试、覆盖率与启动检查。
+- [x] 已通过父仓库本地复制集成测试。
+- [x] 已完成 Git 索引敏感文件检查。
+- [x] 已完成提交前审核；提交与推送结果以 Git 历史和交付记录为准。
+
+> 文件名 `SUBMODULE_INTEGRATION_PLAN.md` 为兼容历史引用而保留；当前方案明确不使用 Git submodule。
+>
+> **审核结论**：通过，可以按本计划执行和维护本地复制集成。

@@ -1,0 +1,3 @@
+display_name: Googlemail Automation Guard
+short_description: Guard Node Playwright Google account automation work
+default_prompt: Use $googlemail-automation-guard when changing or reviewing this Node.js Playwright Google account automation project.

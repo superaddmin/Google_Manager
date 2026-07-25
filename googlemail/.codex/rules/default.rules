@@ -1,0 +1,12 @@
+# Googlemail project execpolicy rules.
+# Conservative by default because this repository handles Google account credentials and TOTP secrets.
+
+prefix_rule(pattern=["node", "--check"], decision="allow", justification="Static ESM syntax checks do not execute project login logic.", match=["node --check src/main.mjs"])
+prefix_rule(pattern=["npm", "install"], decision="allow", justification="Project dependency installation is a standard setup action.", match=["npm install"])
+prefix_rule(pattern=["npm", "ci"], decision="allow", justification="Project dependency installation from lockfile is a standard setup action.", match=["npm ci"])
+
+prefix_rule(pattern=["npm", "start"], decision="prompt", justification="Runs batch Google account automation and may modify real account 2FA/recovery settings.", match=["npm start"])
+prefix_rule(pattern=["npm", "run", "test-login"], decision="prompt", justification="Runs a real headed browser login and may modify a selected account.", match=["npm run test-login"])
+prefix_rule(pattern=["node", "src/main.mjs"], decision="prompt", justification="Runs batch Google account automation and writes sensitive results.", match=["node src/main.mjs"])
+prefix_rule(pattern=["node", "src/test-login.mjs"], decision="prompt", justification="Runs real browser login and account modification flow.", match=["node src/test-login.mjs"])
+prefix_rule(pattern=["node", "src/verify-2fa.mjs"], decision="prompt", justification="Reads the real account file; command output is redacted.", match=["node src/verify-2fa.mjs"])

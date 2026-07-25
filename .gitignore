@@ -17,8 +17,20 @@ instance/
 # Node.js
 node_modules/
 
+# Vendored Googlemail runtime data
+googlemail/browser-data/
+googlemail/output/
+googlemail/coverage/
+googlemail/test-temp-*/
+googlemail/playwright-report/
+googlemail/test-results/
+googlemail/*.txt
+googlemail/.codex/tmp/
+googlemail/.codex/.tmp/
+googlemail/.codex/**/*.sqlite
+googlemail/.codex/**/*.sqlite-*
+
 # Logs and editor metadata
 *.log
 .idea/
 .vscode/
-

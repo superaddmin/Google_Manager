@@ -1,0 +1,16 @@
+node_modules/
+browser-data/
+output/
+coverage/
+test-temp-*/
+playwright-report/
+test-results/
+宝贝信息-*.txt
+*.log
+.env
+.env.*
+!.env.example
+.codex/tmp/
+.codex/.tmp/
+.codex/**/*.sqlite
+.codex/**/*.sqlite-*

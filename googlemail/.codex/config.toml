@@ -1,0 +1,68 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+# Googlemail 项目级 Codex 配置。
+# 只保存当前仓库专属代理、技能、规则与最小权限；模型提供商、认证、通知等机器级配置留在用户级 config.toml。
+
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+project_doc_max_bytes = 30000
+project_doc_fallback_filenames = ["AGENTS.md", "docs/README.md", "docs/usage.md", "docs/configuration.md"]
+
+[sandbox_workspace_write]
+network_access = true
+writable_roots = ["F:/Google_Manager/googlemail"]
+
+[features]
+multi_agent = true
+hooks = false
+
+[agents]
+max_threads = 4
+max_depth = 1
+job_max_runtime_seconds = 1800
+
+[agents."googlemail-automation-architect"]
+description = "Googlemail 项目架构与方案代理：负责 Node.js ESM、Playwright Google 安全设置自动化、账号/进度/结果数据流的改动设计；必须限制在授权账号和最小变更内。"
+config_file = "agents/googlemail-automation-architect.toml"
+nickname_candidates = ["架构守门员", "流程设计师"]
+
+[agents."googlemail-playwright-flow-debugger"]
+description = "Googlemail Playwright 流程排障代理：负责登录页、2FA、恢复邮箱页面选择器、截图与日志定位；禁止扩大规避检测或无授权真实账号操作。"
+config_file = "agents/googlemail-playwright-flow-debugger.toml"
+nickname_candidates = ["浏览器侦错员", "流程探针"]
+
+[agents."googlemail-totp-secret-reviewer"]
+description = "Googlemail TOTP 与敏感数据审查代理：负责密钥格式、TOTP 窗口、日志脱敏、结果文件与账号文件安全边界。"
+config_file = "agents/googlemail-totp-secret-reviewer.toml"
+nickname_candidates = ["密钥审计员", "凭据守门员"]
+
+[agents."googlemail-node-esm-verifier"]
+description = "Googlemail Node ESM 验证代理：负责 package、ESM 模块依赖、node --check、npm 脚本和最小静态验证，不执行真实登录流程。"
+config_file = "agents/googlemail-node-esm-verifier.toml"
+nickname_candidates = ["语法校验员", "ESM 维修员"]
+
+[agents."googlemail-doc-runbook-updater"]
+description = "Googlemail 文档与运行手册代理：负责同步 docs、AGENTS.md、.codex/context 与运行命令说明，必须避免写入真实账号、密钥或验证码。"
+config_file = "agents/googlemail-doc-runbook-updater.toml"
+nickname_candidates = ["文档管家", "手册同步员"]
+
+[[skills.config]]
+path = "F:/Google_Manager/googlemail/.codex/skills/googlemail-automation-guard"
+enabled = true
+
+[mcp_servers.googlemail-filesystem]
+enabled = true
+command = "cmd"
+args = [
+  "/c",
+  "npx",
+  "-y",
+  "@modelcontextprotocol/server-filesystem",
+  "F:/Google_Manager/googlemail",
+]
+default_tools_approval_mode = "prompt"
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+
+[mcp_servers.googlemail-filesystem.env]
+MCP_FILESYSTEM_MAX_FILES = "5000"
+MCP_FILESYSTEM_MAX_SIZE = "52428800"

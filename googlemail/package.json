@@ -1,0 +1,30 @@
+{
+  "name": "google-2fa-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "自动修改Google账号两步验证(2FA)工具",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "files": [
+    "src/",
+    "docs/"
+  ],
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test-login": "node src/test-login.mjs",
+    "test:startup": "node src/startup-check.mjs",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "otplib": "13.4.1",
+    "playwright": "1.60.0"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "4.1.10",
+    "vitest": "4.1.10"
+  }
+}
