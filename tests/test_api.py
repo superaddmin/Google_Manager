@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pyotp
 
 from app import create_app, db
+from app.config import ProductionConfig
 from app.models.account import Account
 from app.models.account_history import AccountHistory
 from app.services.auth_service import AuthService, login_attempts
@@ -39,10 +40,31 @@ class ApiTestCase(unittest.TestCase):
     def current_salt():
         return AuthService.generate_salt(int(time.time()))
 
-    def test_production_requires_explicit_secret_key(self):
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "SECRET_KEY"):
-                create_app("production")
+    def test_production_requires_strong_secret_and_secure_cookie_settings(self):
+        for secret in ("", "   ", "x" * 31):
+            with self.subTest(secret_length=len(secret)):
+                with patch.dict(os.environ, {"SECRET_KEY": secret}, clear=True):
+                    with self.assertRaisesRegex(RuntimeError, "32"):
+                        create_app("production")
+
+        with (
+            patch.dict(os.environ, {"SECRET_KEY": "x" * 32}, clear=True),
+            patch.object(
+                ProductionConfig,
+                "SQLALCHEMY_DATABASE_URI",
+                "sqlite:///:memory:",
+            ),
+        ):
+            production_app = create_app("production")
+
+        self.assertEqual(production_app.config["SECRET_KEY"], "x" * 32)
+        self.assertTrue(production_app.config["SESSION_COOKIE_SECURE"])
+        self.assertTrue(production_app.config["SESSION_COOKIE_HTTPONLY"])
+        self.assertEqual(production_app.config["SESSION_COOKIE_SAMESITE"], "Lax")
+        self.assertEqual(
+            production_app.config["PERMANENT_SESSION_LIFETIME"].days,
+            7,
+        )
 
     def create_account(self, email="user@example.test", **overrides):
         payload = {

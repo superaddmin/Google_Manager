@@ -188,7 +188,7 @@ app.run(host='0.0.0.0', port=8002)  # 修改 port 值
 
 ### 配置生产会话密钥
 
-production 配置要求通过环境变量提供随机会话密钥，缺少时应用会停止启动：
+production 配置要求通过环境变量提供至少 32 字节的随机会话密钥，缺少或过短时应用会停止启动：
 
 ```powershell
 $env:SECRET_KEY = '<RANDOM_SECRET>'

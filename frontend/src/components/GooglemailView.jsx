@@ -16,6 +16,7 @@ const terminalStatuses = new Set(['completed', 'failed', 'cancelled']);
 const statusLabels = {
     pending: '等待启动',
     running: '执行中',
+    finalizing: '正在同步结果',
     completed: '已完成',
     failed: '执行失败',
     cancelled: '已取消',

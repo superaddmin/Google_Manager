@@ -278,11 +278,15 @@ class GooglemailTaskManager:
 
     def _run_task(self, app, record):
         timer = None
+        process = None
+        exit_code = None
+        process_started = False
+        runtime_error_code = None
+        synced_count = 0
+        result_sync_succeeded = False
         try:
             with self._lock:
                 if record.cancel_requested:
-                    record.status = 'cancelled'
-                    record.error_code = 'TASK_CANCELLED'
                     return
                 record.status = 'running'
                 record.started_at = _iso_now()
@@ -313,6 +317,7 @@ class GooglemailTaskManager:
                 errors='replace',
                 creationflags=creation_flags,
             )
+            process_started = True
             with self._lock:
                 record.process = process
                 cancel_requested = record.cancel_requested
@@ -332,45 +337,66 @@ class GooglemailTaskManager:
                 for _line in process.stdout:
                     pass
             exit_code = process.wait()
+        except Exception:
+            runtime_error_code = (
+                'PROCESS_RUNTIME_FAILED' if process_started else 'PROCESS_START_FAILED'
+            )
+            if process and process.poll() is None:
+                self._terminate_process(process)
+            if process:
+                try:
+                    exit_code = process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        finally:
+            if timer:
+                timer.cancel()
 
             with self._lock:
+                record.status = 'finalizing'
+                record.process = None
                 record.exit_code = exit_code
                 self._refresh_counts(record)
-                if record.timed_out:
+
+            if process_started:
+                try:
+                    synced_count = self._sync_results(app, record)
+                    result_sync_succeeded = True
+                except Exception:
+                    runtime_error_code = 'RESULT_SYNC_FAILED'
+
+            cleanup_succeeded = self._remove_file(record.input_file)
+            if result_sync_succeeded:
+                cleanup_succeeded = (
+                    self._remove_file(record.output_dir / 'result.txt')
+                    and cleanup_succeeded
+                )
+
+            with self._lock:
+                record.synced_count = synced_count
+                if runtime_error_code == 'RESULT_SYNC_FAILED':
+                    record.status = 'failed'
+                    record.error_code = runtime_error_code
+                elif not cleanup_succeeded:
+                    record.status = 'failed'
+                    record.error_code = 'SENSITIVE_CLEANUP_FAILED'
+                elif record.timed_out:
                     record.status = 'failed'
                     record.error_code = 'TASK_TIMEOUT'
                 elif record.cancel_requested:
                     record.status = 'cancelled'
                     record.error_code = 'TASK_CANCELLED'
+                elif runtime_error_code:
+                    record.status = 'failed'
+                    record.error_code = runtime_error_code
                 elif exit_code != 0:
                     record.status = 'failed'
                     record.error_code = 'PROCESS_EXIT_NONZERO'
                 else:
-                    try:
-                        record.synced_count = self._sync_results(app, record)
-                        record.status = 'completed'
-                    except Exception:
-                        record.status = 'failed'
-                        record.error_code = 'RESULT_SYNC_FAILED'
-        except Exception:
-            with self._lock:
-                record.status = 'failed'
-                record.error_code = record.error_code or 'PROCESS_START_FAILED'
-        finally:
-            if timer:
-                timer.cancel()
-            with self._lock:
-                record.process = None
+                    record.status = 'completed'
+                    record.error_code = None
                 record.finished_at = _iso_now()
                 self._refresh_counts(record)
-            for sensitive_file in (
-                record.input_file,
-                record.output_dir / 'result.txt',
-            ):
-                try:
-                    sensitive_file.unlink()
-                except OSError:
-                    pass
 
     def _sync_results(self, app, record):
         result_file = record.output_dir / 'result.txt'
@@ -401,8 +427,18 @@ class GooglemailTaskManager:
                 if not AccountService.update_account(account_id, update_data):
                     raise ValueError('Googlemail 结果对应账号不存在')
                 synced_count += 1
-        result_file.unlink()
         return synced_count
+
+    @staticmethod
+    def _remove_file(path, attempts=3):
+        for attempt in range(attempts):
+            try:
+                path.unlink(missing_ok=True)
+                return True
+            except OSError:
+                if attempt + 1 < attempts:
+                    time.sleep(0.05)
+        return False
 
     def _refresh_counts(self, record):
         progress_file = record.output_dir / 'progress.json'

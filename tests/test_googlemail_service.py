@@ -6,12 +6,13 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app import create_app, db
 from app.models.account import Account
 from app.models.account_history import AccountHistory
 from app.services.googlemail_service import (
+    GooglemailTaskError,
     GooglemailTaskManager,
     GooglemailValidationError,
     normalize_googlemail_options,
@@ -64,6 +65,19 @@ class ControlledProcess:
         self.finished.set()
 
 
+class BlockingSyncTaskManager(GooglemailTaskManager):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sync_started = threading.Event()
+        self.release_sync = threading.Event()
+
+    def _sync_results(self, app, record):
+        self.sync_started.set()
+        if not self.release_sync.wait(1):
+            raise TimeoutError("test sync barrier timed out")
+        return super()._sync_results(app, record)
+
+
 class GooglemailTaskManagerTestCase(unittest.TestCase):
     def setUp(self):
         self.app = create_app("testing")
@@ -107,6 +121,21 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
             task = manager.get_task(task_id)
         return task
 
+    @staticmethod
+    def write_result(environment, secret=NEW_SECRET):
+        fields = Path(environment["ACCOUNTS_FILE"]).read_text(
+            encoding="utf-8"
+        ).strip().split("----")
+        fields[2] = "new-recovery@example.test"
+        fields[3] = secret
+        output_dir = Path(environment["OUTPUT_DIR"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "result.txt").write_text(
+            "----".join(fields) + "\n",
+            encoding="utf-8",
+        )
+        return output_dir
+
     def test_options_are_normalized_and_validated(self):
         options = normalize_googlemail_options({
             "headless": False,
@@ -148,7 +177,9 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
                 json.dumps({"completed": [email], "failed": [], "lastIndex": 0}),
                 encoding="utf-8",
             )
-            return FakeProcess()
+            process = FakeProcess()
+            process.stdout = io.StringIO("CHILD_SECRET_OUTPUT\n")
+            return process
 
         manager = GooglemailTaskManager(
             project_root=self.project_root,
@@ -167,8 +198,16 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
         self.assertEqual(task["status"], "completed", task)
         self.assertEqual(task["completedCount"], 1)
         self.assertEqual(task["syncedCount"], 1)
-        self.assertNotIn("email", json.dumps(task).lower())
-        self.assertNotIn(NEW_SECRET, json.dumps(task))
+        public_payload = json.dumps(task)
+        for sensitive_value in (
+            "fixture@example.test",
+            "Password-1",
+            "old-recovery@example.test",
+            "JBSWY3DPEHPK3PXP",
+            NEW_SECRET,
+            "CHILD_SECRET_OUTPUT",
+        ):
+            self.assertNotIn(sensitive_value, public_payload)
         self.assertNotIn("SECRET_KEY", captured_environment)
         task_dir = self.project_root / "runtime" / "tasks" / task["taskId"]
         self.assertFalse((task_dir / "accounts.txt").exists())
@@ -213,13 +252,85 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
         task_dir = self.project_root / "runtime" / "tasks" / task["taskId"]
         self.assertFalse((task_dir / "accounts.txt").exists())
 
-    def test_timeout_terminates_process_and_sets_error_code(self):
+    def test_cancel_after_partial_result_syncs_before_terminal_status(self):
         account = self.create_account()
+        account_id = account.id
         process = ControlledProcess()
+
+        def partial_result_popen(_command, **kwargs):
+            self.write_result(kwargs["env"])
+            return process
+
         manager = GooglemailTaskManager(
             project_root=self.project_root,
             node_path="node-fixture",
-            popen_factory=lambda _command, **_kwargs: process,
+            popen_factory=partial_result_popen,
+        )
+        task = manager.start_task(self.app, [account], {"maxRuntimeMinutes": 1})
+        record = manager._tasks[task["taskId"]]
+        deadline = time.time() + 1
+        while time.time() < deadline and record.process is None:
+            time.sleep(0.01)
+        self.assertIs(record.process, process)
+
+        manager.cancel_task(task["taskId"])
+        task = self.wait_for_terminal_task(manager, task["taskId"])
+
+        self.assertEqual(task["status"], "cancelled", task)
+        self.assertEqual(task["syncedCount"], 1)
+        db.session.expire_all()
+        self.assertEqual(db.session.get(Account, account_id).secret, NEW_SECRET)
+        task_dir = self.project_root / "runtime" / "tasks" / task["taskId"]
+        self.assertFalse((task_dir / "accounts.txt").exists())
+        self.assertFalse((task_dir / "output" / "result.txt").exists())
+
+    def test_cancel_during_finalizing_syncs_result_before_publishing_terminal(self):
+        account = self.create_account()
+        account_id = account.id
+
+        def completed_popen(_command, **kwargs):
+            self.write_result(kwargs["env"])
+            return FakeProcess()
+
+        manager = BlockingSyncTaskManager(
+            project_root=self.project_root,
+            node_path="node-fixture",
+            popen_factory=completed_popen,
+        )
+        task = manager.start_task(self.app, [account], {"maxRuntimeMinutes": 1})
+        self.assertTrue(manager.sync_started.wait(1))
+
+        finalizing_task = manager.get_task(task["taskId"])
+        self.assertEqual(finalizing_task["status"], "finalizing")
+        task_dir = self.project_root / "runtime" / "tasks" / task["taskId"]
+        self.assertTrue((task_dir / "accounts.txt").exists())
+        with self.assertRaises(GooglemailTaskError):
+            manager.start_task(self.app, [account], {"maxRuntimeMinutes": 1})
+
+        manager.cancel_task(task["taskId"])
+        manager.release_sync.set()
+        task = self.wait_for_terminal_task(manager, task["taskId"])
+
+        self.assertEqual(task["status"], "cancelled", task)
+        self.assertEqual(task["syncedCount"], 1)
+        self.assertFalse((task_dir / "accounts.txt").exists())
+        self.assertFalse((task_dir / "output" / "result.txt").exists())
+        db.session.expire_all()
+        self.assertEqual(db.session.get(Account, account_id).secret, NEW_SECRET)
+
+    def test_timeout_terminates_process_and_sets_error_code(self):
+        account = self.create_account()
+        account_id = account.id
+        process = ControlledProcess()
+
+        def partial_result_popen(_command, **kwargs):
+            self.write_result(kwargs["env"])
+            return process
+
+        manager = GooglemailTaskManager(
+            project_root=self.project_root,
+            node_path="node-fixture",
+            popen_factory=partial_result_popen,
         )
         task = manager.start_task(self.app, [account], {"maxRuntimeMinutes": 1})
 
@@ -234,21 +345,17 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
 
         self.assertEqual(task["status"], "failed", task)
         self.assertEqual(task["errorCode"], "TASK_TIMEOUT")
+        self.assertEqual(task["syncedCount"], 1)
         self.assertTrue(process.terminated.is_set())
+        db.session.expire_all()
+        self.assertEqual(db.session.get(Account, account_id).secret, NEW_SECRET)
 
-    def test_nonzero_exit_removes_sensitive_result_file(self):
+    def test_nonzero_exit_syncs_and_removes_sensitive_result_file(self):
         account = self.create_account()
+        account_id = account.id
 
         def failing_popen(_command, **kwargs):
-            input_line = Path(kwargs["env"]["ACCOUNTS_FILE"]).read_text(
-                encoding="utf-8"
-            ).strip()
-            output_dir = Path(kwargs["env"]["OUTPUT_DIR"])
-            output_dir.mkdir(parents=True)
-            (output_dir / "result.txt").write_text(
-                input_line + "\n",
-                encoding="utf-8",
-            )
+            self.write_result(kwargs["env"])
             return FakeProcess(return_code=1)
 
         manager = GooglemailTaskManager(
@@ -261,8 +368,54 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
 
         self.assertEqual(task["status"], "failed", task)
         self.assertEqual(task["errorCode"], "PROCESS_EXIT_NONZERO")
+        self.assertEqual(task["syncedCount"], 1)
         task_dir = self.project_root / "runtime" / "tasks" / task["taskId"]
         self.assertFalse((task_dir / "output" / "result.txt").exists())
+        db.session.expire_all()
+        self.assertEqual(db.session.get(Account, account_id).secret, NEW_SECRET)
+
+    def test_result_sync_failure_retains_recovery_file(self):
+        account = self.create_account()
+
+        def completed_popen(_command, **kwargs):
+            self.write_result(kwargs["env"])
+            return FakeProcess()
+
+        manager = GooglemailTaskManager(
+            project_root=self.project_root,
+            node_path="node-fixture",
+            popen_factory=completed_popen,
+        )
+        with patch.object(manager, "_sync_results", side_effect=RuntimeError):
+            task = manager.start_task(self.app, [account], {"maxRuntimeMinutes": 1})
+            task = self.wait_for_terminal_task(manager, task["taskId"])
+
+        self.assertEqual(task["status"], "failed", task)
+        self.assertEqual(task["errorCode"], "RESULT_SYNC_FAILED")
+        task_dir = self.project_root / "runtime" / "tasks" / task["taskId"]
+        self.assertFalse((task_dir / "accounts.txt").exists())
+        self.assertTrue((task_dir / "output" / "result.txt").exists())
+
+    def test_sensitive_file_cleanup_retries_and_reports_failure(self):
+        retry_path = Mock()
+        retry_path.unlink.side_effect = [OSError, OSError, None]
+        with patch("app.services.googlemail_service.time.sleep") as sleep:
+            self.assertTrue(GooglemailTaskManager._remove_file(retry_path))
+        self.assertEqual(retry_path.unlink.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+        account = self.create_account()
+        manager = GooglemailTaskManager(
+            project_root=self.project_root,
+            node_path="node-fixture",
+            popen_factory=lambda _command, **_kwargs: FakeProcess(),
+        )
+        with patch.object(manager, "_remove_file", return_value=False):
+            task = manager.start_task(self.app, [account], {"maxRuntimeMinutes": 1})
+            task = self.wait_for_terminal_task(manager, task["taskId"])
+
+        self.assertEqual(task["status"], "failed", task)
+        self.assertEqual(task["errorCode"], "SENSITIVE_CLEANUP_FAILED")
 
     def test_windows_termination_kills_the_process_tree(self):
         process = ControlledProcess()
