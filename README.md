@@ -92,7 +92,7 @@
 
 1. **克隆项目**
 ```bash
-git clone https://github.com/yynxxxxx/Google_Manager.git
+git clone https://github.com/superaddmin/Google_Manager.git
 cd Google_Manager
 ```
 
