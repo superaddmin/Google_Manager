@@ -11,3 +11,9 @@ pyotp==2.9.0
 
 # 开发工具
 python-dotenv==1.0.0
+
+# Gmail API OAuth
+google-api-python-client==2.187.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.2
+cryptography==46.0.1

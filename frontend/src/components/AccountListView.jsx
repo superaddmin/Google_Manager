@@ -3,6 +3,8 @@ import {
     Search,
     Mail,
     Key,
+    Eye,
+    EyeOff,
     Edit3,
     Trash2,
     ShieldCheck,
@@ -11,12 +13,17 @@ import {
     StickyNote,
     Copy,
     History,
-    Filter
+    Filter,
+    Download,
+    Tag,
+    ShoppingCart,
+    X
 } from 'lucide-react';
 import ActionButton from './ActionButton';
 import Pagination from './Pagination';
 import usePagination from '../hooks/usePagination';
 import HistoryDrawer from './HistoryDrawer';
+import api from '../services/api';
 
 /**
  * 账号列表视图组件
@@ -32,12 +39,19 @@ const AccountListView = ({
     toggleSoldStatus,
     onEdit,
     onDelete,
+    onBatchDelete,
+    onBatchSold,
+    onBatchRemark,
     loading,
     onSearchChange,
     darkMode
 }) => {
     // 筛选状态: 'all' | 'sold' | 'unsold'
     const [soldFilter, setSoldFilter] = useState('all');
+    const [visiblePasswords, setVisiblePasswords] = useState(() => new Set());
+    const [selectedIds, setSelectedIds] = useState([]);
+    const [exportFormat, setExportFormat] = useState('csv');
+    const [exporting, setExporting] = useState(false);
 
     // 根据筛选过滤账号
     const filteredAccounts = useMemo(() => {
@@ -47,6 +61,43 @@ const AccountListView = ({
 
     // 使用分页 Hook
     const pagination = usePagination(filteredAccounts, 10);
+
+    // 选择状态辅助：清理已不存在的账号
+    const validIds = useMemo(() => new Set(accounts.map(acc => acc.id)), [accounts]);
+    const currentPageIds = useMemo(
+        () => pagination.paginatedData.map(acc => acc.id),
+        [pagination.paginatedData]
+    );
+    const allPageSelected = currentPageIds.length > 0
+        && currentPageIds.every(id => selectedIds.includes(id));
+    const somePageSelected = currentPageIds.some(id => selectedIds.includes(id));
+
+    const toggleSelectAll = () => {
+        setSelectedIds(current => allPageSelected
+            ? current.filter(id => !currentPageIds.includes(id))
+            : [...new Set([...current.filter(id => validIds.has(id)), ...currentPageIds])]);
+    };
+
+    const toggleSelect = (accountId) => {
+        setSelectedIds(current => current.includes(accountId)
+            ? current.filter(id => id !== accountId)
+            : [...current, accountId]);
+    };
+
+    const clearSelection = () => setSelectedIds([]);
+
+    // --- 导出 ---
+    const handleExport = () => {
+        const url = api.buildExportUrl(search, soldFilter, exportFormat);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.rel = 'noopener';
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        setExporting(true);
+        setTimeout(() => setExporting(false), 1500);
+    };
 
     // 历史抽屉状态
     const [historyDrawer, setHistoryDrawer] = useState({ isOpen: false, account: null });
@@ -70,6 +121,18 @@ const AccountListView = ({
         setHistoryDrawer({ isOpen: false, account: null });
     };
 
+    const togglePasswordVisibility = (accountId) => {
+        setVisiblePasswords(current => {
+            const next = new Set(current);
+            if (next.has(accountId)) {
+                next.delete(accountId);
+            } else {
+                next.add(accountId);
+            }
+            return next;
+        });
+    };
+
     // 复制全部信息
     const copyAllInfo = (acc) => {
         // 去除2FA密钥中的空格
@@ -90,17 +153,46 @@ const AccountListView = ({
                         <h1 className={`text-2xl font-bold ${darkMode ? 'text-slate-100' : 'text-slate-900'}`}>账号库</h1>
                         <p className={darkMode ? 'text-slate-400' : 'text-slate-500'}>管理您的所有谷歌账号资产</p>
                     </div>
-                    <div className="relative w-full md:w-80">
-                        <Search className={`absolute left-3 top-1/2 -translate-y-1/2 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} size={18} />
-                        <input
-                            type="text"
-                            placeholder="搜索邮箱或备注内容..."
-                            value={search}
-                            onChange={handleSearchChange}
-                            className={`w-full pl-10 pr-4 py-2.5 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all shadow-sm ${darkMode
-                                ? 'bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500'
-                                : 'bg-white border-slate-200 text-slate-800 placeholder-slate-400'} border`}
-                        />
+                    <div className="flex items-center gap-2 w-full md:w-auto">
+                        <div className={`flex items-center rounded-xl border shadow-sm overflow-hidden ${darkMode
+                            ? 'bg-slate-800 border-slate-700'
+                            : 'bg-white border-slate-200'}`}>
+                            <select
+                                value={exportFormat}
+                                onChange={(e) => setExportFormat(e.target.value)}
+                                aria-label="导出格式"
+                                className={`px-2 py-2.5 text-sm outline-none cursor-pointer ${darkMode
+                                    ? 'bg-slate-800 text-slate-200'
+                                    : 'bg-white text-slate-700'}`}
+                            >
+                                <option value="csv">CSV</option>
+                                <option value="txt">TXT</option>
+                                <option value="json">JSON</option>
+                            </select>
+                            <button
+                                onClick={handleExport}
+                                disabled={exporting || accounts.length === 0}
+                                className={`flex items-center gap-1.5 px-3 py-2.5 text-sm font-bold transition-all ${darkMode
+                                    ? 'bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600 hover:text-white'
+                                    : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                                title="按当前搜索与筛选条件导出账号"
+                            >
+                                <Download size={16} />
+                                <span>导出</span>
+                            </button>
+                        </div>
+                        <div className="relative w-full md:w-80">
+                            <Search className={`absolute left-3 top-1/2 -translate-y-1/2 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} size={18} />
+                            <input
+                                type="text"
+                                placeholder="搜索邮箱或备注内容..."
+                                value={search}
+                                onChange={handleSearchChange}
+                                className={`w-full pl-10 pr-4 py-2.5 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all shadow-sm ${darkMode
+                                    ? 'bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500'
+                                    : 'bg-white border-slate-200 text-slate-800 placeholder-slate-400'} border`}
+                            />
+                        </div>
                     </div>
                 </div>
 
@@ -138,6 +230,80 @@ const AccountListView = ({
                     </div>
                 </div>
 
+                {/* 批量操作栏 */}
+                {selectedIds.length > 0 && (
+                    <div className={`flex flex-wrap items-center gap-2 px-4 py-3 rounded-2xl border animate-in fade-in slide-in-from-top-2 duration-200 ${darkMode
+                        ? 'bg-blue-950/30 border-blue-800/60'
+                        : 'bg-blue-50 border-blue-200'}`}>
+                        <span className={`text-sm font-bold ${darkMode ? 'text-blue-300' : 'text-blue-700'}`}>
+                            已选 {selectedIds.length} 项
+                        </span>
+                        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+                            <button
+                                onClick={() => {
+                                    const remark = window.prompt('为选中的账号设置备注（留空则清空备注）：', '');
+                                    if (remark === null) return;
+                                    Promise.resolve(onBatchRemark(selectedIds, remark)).then(ok => {
+                                        if (ok) clearSelection();
+                                    });
+                                }}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border transition-all ${darkMode
+                                    ? 'border-amber-700 text-amber-300 hover:bg-amber-900/40'
+                                    : 'border-amber-300 text-amber-700 hover:bg-amber-100'}`}
+                            >
+                                <Tag size={14} />
+                                批量备注
+                            </button>
+                            <button
+                                onClick={() => {
+                                    Promise.resolve(onBatchSold(selectedIds, 'sold')).then(ok => {
+                                        if (ok) clearSelection();
+                                    });
+                                }}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border border-red-300 text-red-600 hover:bg-red-50 dark:border-red-700 dark:text-red-300 dark:hover:bg-red-900/40 transition-all"
+                            >
+                                <ShoppingCart size={14} />
+                                批量标记售出
+                            </button>
+                            <button
+                                onClick={() => {
+                                    Promise.resolve(onBatchSold(selectedIds, 'unsold')).then(ok => {
+                                        if (ok) clearSelection();
+                                    });
+                                }}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border transition-all ${darkMode
+                                    ? 'border-green-700 text-green-300 hover:bg-green-900/40'
+                                    : 'border-green-300 text-green-700 hover:bg-green-50'}`}
+                            >
+                                <ShoppingCart size={14} />
+                                批量标记未售出
+                            </button>
+                            <button
+                                onClick={() => {
+                                    Promise.resolve(onBatchDelete(selectedIds)).then(ok => {
+                                        if (ok) clearSelection();
+                                    });
+                                }}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border transition-all ${darkMode
+                                    ? 'border-red-700 text-red-300 hover:bg-red-900/40'
+                                    : 'border-red-300 text-red-600 hover:bg-red-50'}`}
+                            >
+                                <Trash2 size={14} />
+                                批量删除
+                            </button>
+                            <button
+                                onClick={clearSelection}
+                                className={`flex items-center gap-1 px-2 py-1.5 text-xs font-bold rounded-lg transition-all ${darkMode
+                                    ? 'text-slate-400 hover:text-slate-200'
+                                    : 'text-slate-500 hover:text-slate-700'}`}
+                            >
+                                <X size={14} />
+                                取消选择
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 <div className={`rounded-3xl border shadow-sm overflow-hidden transition-colors ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
                     <div className="overflow-x-auto">
                         <table className="w-full text-left border-collapse">
@@ -145,8 +311,21 @@ const AccountListView = ({
                                 <tr className={`border-b text-xs uppercase tracking-wider font-semibold ${darkMode
                                     ? 'bg-slate-700/50 border-slate-600 text-slate-400'
                                     : 'bg-slate-50/50 border-slate-100 text-slate-400'}`}>
+                                    <th className="px-3 py-4 text-center w-[44px]">
+                                        <input
+                                            type="checkbox"
+                                            checked={allPageSelected}
+                                            ref={el => {
+                                                if (el) el.indeterminate = !allPageSelected && somePageSelected;
+                                            }}
+                                            onChange={toggleSelectAll}
+                                            className="w-4 h-4 accent-blue-600 cursor-pointer"
+                                            aria-label="选择当前页全部账号"
+                                        />
+                                    </th>
                                     <th className="px-4 py-4 text-center w-[60px]">序号</th>
                                     <th className="px-4 py-4">谷歌账号</th>
+                                    <th className="px-4 py-4 w-[220px]">密码</th>
                                     <th className="px-4 py-4 text-center w-[70px]">状态</th>
                                     <th className="px-4 py-4">恢复邮箱</th>
                                     <th className="px-4 py-4 w-[120px]">2FA 验证</th>
@@ -159,7 +338,7 @@ const AccountListView = ({
                             <tbody className={`divide-y ${darkMode ? 'divide-slate-700' : 'divide-slate-100'}`}>
                                 {loading ? (
                                     <tr>
-                                        <td colSpan="9" className="px-6 py-20 text-center">
+                                        <td colSpan="11" className="px-6 py-20 text-center">
                                             <div className="flex flex-col items-center text-slate-400">
                                                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mb-4"></div>
                                                 <p className="text-lg font-medium">加载中...</p>
@@ -170,6 +349,16 @@ const AccountListView = ({
                                     <tr key={acc.id} className={`transition-colors group ${darkMode
                                         ? (index % 2 === 0 ? 'bg-slate-800/80' : 'bg-slate-900/60') + ' hover:bg-slate-700/70'
                                         : (index % 2 === 0 ? 'bg-white' : 'bg-blue-50/60') + ' hover:bg-blue-100/70'}`}>
+                                        {/* 勾选 */}
+                                        <td className="px-3 py-4 text-center">
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedIds.includes(acc.id)}
+                                                onChange={() => toggleSelect(acc.id)}
+                                                className="w-4 h-4 accent-blue-600 cursor-pointer"
+                                                aria-label={`选择 ${acc.email}`}
+                                            />
+                                        </td>
                                         {/* 序号 - 显示全局序号 */}
                                         <td className="px-4 py-4 text-center">
                                             <span className={`inline-flex items-center justify-center w-7 h-7 text-sm font-bold rounded-lg ${darkMode
@@ -195,6 +384,35 @@ const AccountListView = ({
                                                     <History size={14} />
                                                 </button>
                                             </div>
+                                        </td>
+                                        {/* 登录密码 */}
+                                        <td className="px-4 py-4 max-w-[220px]">
+                                            {(() => {
+                                                const passwordVisible = visiblePasswords.has(acc.id);
+                                                const password = acc.password || '';
+                                                return (
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                        <span
+                                                            className={`font-mono text-sm truncate flex-1 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}
+                                                            title={passwordVisible ? (password || '未设置') : '密码已隐藏'}
+                                                        >
+                                                            {passwordVisible ? (password || '未设置') : '••••••••'}
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => togglePasswordVisibility(acc.id)}
+                                                            className={`p-1 rounded-md transition-all flex-shrink-0 ${darkMode
+                                                                ? 'text-slate-500 hover:text-blue-300 hover:bg-slate-700'
+                                                                : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'}`}
+                                                            title={passwordVisible ? '隐藏密码' : '显示密码'}
+                                                            aria-label={passwordVisible ? `隐藏 ${acc.email} 的密码` : `显示 ${acc.email} 的密码`}
+                                                            aria-pressed={passwordVisible}
+                                                        >
+                                                            {passwordVisible ? <EyeOff size={15} /> : <Eye size={15} />}
+                                                        </button>
+                                                    </div>
+                                                );
+                                            })()}
                                         </td>
                                         {/* 状态 */}
                                         <td className="px-4 py-4 text-center">
@@ -302,7 +520,7 @@ const AccountListView = ({
                                     </tr>
                                 )) : (
                                     <tr>
-                                        <td colSpan="9" className="px-6 py-20 text-center">
+                                        <td colSpan="11" className="px-6 py-20 text-center">
                                             <div className="flex flex-col items-center text-slate-300">
                                                 <Search size={48} className="mb-4 opacity-20" />
                                                 <p className="text-lg font-medium">未找到相关账号</p>

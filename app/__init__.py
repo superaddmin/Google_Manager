@@ -29,14 +29,21 @@ def create_app(config_name=None):
     from app.config import config
     config_name = config_name or os.environ.get('FLASK_ENV', 'development')
     production_secret = os.environ.get('SECRET_KEY', '')
+    admin_password = os.environ.get('ADMIN_PASSWORD', '')
     if (
         config_name == 'production'
         and len(production_secret.strip().encode('utf-8')) < 32
     ):
         raise RuntimeError('生产环境 SECRET_KEY 必须至少为 32 字节')
+    if config_name != 'testing' and not admin_password:
+        raise RuntimeError('非测试环境必须通过 ADMIN_PASSWORD 配置管理员密码')
+    if config_name == 'production' and not os.environ.get('GMAIL_TOKEN_ENCRYPTION_KEY'):
+        raise RuntimeError('生产环境必须通过 GMAIL_TOKEN_ENCRYPTION_KEY 配置 Gmail Token 加密密钥')
     app.config.from_object(config[config_name])
     if config_name == 'production':
         app.config['SECRET_KEY'] = production_secret
+    if config_name != 'testing':
+        app.config['ADMIN_PASSWORD'] = admin_password
     
     # 初始化扩展
     db.init_app(app)

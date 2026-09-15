@@ -15,10 +15,14 @@ const LoginPage = ({ onLoginSuccess, darkMode }) => {
 
     // 检查是否被封禁
     useEffect(() => {
+        let active = true;
         const checkBanStatus = async () => {
             try {
                 const result = await api.checkAuth();
-                if (result.banned) {
+                if (!active) return;
+                if (result.authenticated) {
+                    onLoginSuccess();
+                } else if (result.banned) {
                     setBanned(true);
                     setBanMessage(result.message);
                 }
@@ -27,6 +31,7 @@ const LoginPage = ({ onLoginSuccess, darkMode }) => {
             }
         };
         checkBanStatus();
+        return () => { active = false; };
     }, []);
 
     const handleSubmit = async (e) => {
@@ -42,10 +47,6 @@ const LoginPage = ({ onLoginSuccess, darkMode }) => {
         try {
             const result = await api.login(password);
             if (result.success) {
-                // 登录成功，保存到 localStorage（带时间戳，7天有效期）
-                localStorage.setItem('loginData', JSON.stringify({
-                    timestamp: Date.now()
-                }));
                 onLoginSuccess();
             } else {
                 setError(result.message);

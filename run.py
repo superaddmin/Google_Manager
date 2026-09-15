@@ -17,4 +17,4 @@ if __name__ == '__main__':
     print('谷歌账号管理系统启动中...')
     print('访问地址: http://localhost:8002')
     print('=' * 50)
-    app.run(host='0.0.0.0', port=8002, debug=True)
+    app.run(host='127.0.0.1', port=8002)

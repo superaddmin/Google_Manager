@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { UserPlus, FileText, Plus, Activity } from 'lucide-react';
+import { parseAccountImport } from '../utils/accountImport';
 
 /**
  * 导入视图组件
@@ -7,7 +8,9 @@ import { UserPlus, FileText, Plus, Activity } from 'lucide-react';
 const ImportView = ({ onImport, onCancel, darkMode = false }) => {
     const [importMode, setImportMode] = useState('single'); // 'single' 或 'batch'
     const [text, setText] = useState('');
-    const [preview, setPreview] = useState([]);
+    const [importing, setImporting] = useState(false);
+    const { accounts: preview, errors: parseErrors } = useMemo(() => parseAccountImport(text), [text]);
+    const canBatchImport = preview.length > 0 && parseErrors.length === 0 && !importing;
 
     // 单个账号导入的表单状态
     const [singleForm, setSingleForm] = useState({
@@ -17,37 +20,14 @@ const ImportView = ({ onImport, onCancel, darkMode = false }) => {
         secret: '',
     });
 
-    const handleParse = (val) => {
-        setText(val);
-        if (!val.trim()) {
-            setPreview([]);
-            return;
+    const handleBatchImport = async () => {
+        if (!canBatchImport) return;
+        setImporting(true);
+        try {
+            await onImport(preview);
+        } finally {
+            setImporting(false);
         }
-
-        const lines = val.split('\n').filter(l => l.trim());
-        const parsed = lines.map(line => {
-            // 智能识别分隔符：支持 "——"(中文破折号)、"----"(四个横线)、"--"(两个横线)
-            let parts;
-            if (line.includes('——')) {
-                parts = line.split('——');
-            } else if (line.includes('----')) {
-                parts = line.split('----');
-            } else if (line.includes('--')) {
-                parts = line.split('--');
-            } else {
-                parts = [line]; // 无法识别分隔符，整行作为邮箱
-            }
-
-            return {
-                email: parts[0]?.trim() || '',
-                password: parts[1]?.trim() || '',
-                recovery: parts[2]?.trim() || '',
-                // 自动去除 2FA 密钥中的空格
-                secret: (parts[3]?.trim() || '').replace(/\s/g, ''),
-                remark: parts[4]?.trim() || '',
-            };
-        });
-        setPreview(parsed);
     };
 
     const handleSingleFormChange = (field, value) => {
@@ -88,6 +68,7 @@ const ImportView = ({ onImport, onCancel, darkMode = false }) => {
             <div className={`flex gap-2 mb-6 p-1 rounded-xl w-fit ${darkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
                 <button
                     onClick={() => setImportMode('single')}
+                    disabled={importing}
                     className={`flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium transition-all ${importMode === 'single'
                         ? (darkMode ? 'bg-slate-700 shadow-sm text-blue-400' : 'bg-white shadow-sm text-blue-600')
                         : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
@@ -98,6 +79,7 @@ const ImportView = ({ onImport, onCancel, darkMode = false }) => {
                 </button>
                 <button
                     onClick={() => setImportMode('batch')}
+                    disabled={importing}
                     className={`flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium transition-all ${importMode === 'batch'
                         ? (darkMode ? 'bg-slate-700 shadow-sm text-blue-400' : 'bg-white shadow-sm text-blue-600')
                         : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
@@ -244,25 +226,38 @@ const ImportView = ({ onImport, onCancel, darkMode = false }) => {
                             </div>
                             <p
                                 className={`text-xs mb-3 p-3 rounded-lg border border-dashed ${darkMode ? 'text-slate-400 bg-slate-900 border-slate-600' : 'text-slate-400 bg-slate-50 border-slate-200'}`}>
-                                格式：邮箱——密码——恢复邮箱——2FA密钥——备注(可选)
+                                格式：邮箱|密码|恢复邮箱|2FA密钥|备注(可选)。支持 |、——、----、--，第五列国家或地区会保存为备注。
                             </p>
                             <textarea
                                 className={`w-full h-80 px-4 py-4 border rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm resize-none ${inputClass}`}
-                                placeholder="example@gmail.com——password123——recovery@example.com——ABCD1234EFGH5678IJKL"
-                                value={text} onChange={(e) => handleParse(e.target.value)}
+                                aria-label="批量账号文本"
+                                placeholder="example@gmail.com|password123|recovery@example.com|JBSWY3DPEHPK3PXP|UnitedStates"
+                                disabled={importing}
+                                value={text} onChange={(event) => setText(event.target.value)}
                             />
+                            {parseErrors.length > 0 && (
+                                <div role="alert" className="mt-3 rounded-xl border border-red-300 p-3 text-sm text-red-500">
+                                    <p>检测到 {parseErrors.length} 行格式错误，请修正后再导入：</p>
+                                    <ul className="mt-1 space-y-1">
+                                        {parseErrors.slice(0, 5).map(error => (
+                                            <li key={error.lineNumber}>第 {error.lineNumber} 行：{error.message}</li>
+                                        ))}
+                                    </ul>
+                                    {parseErrors.length > 5 && <p>另有 {parseErrors.length - 5} 行错误。</p>}
+                                </div>
+                            )}
                         </div>
                         <div className="flex gap-4">
                             <button onClick={onCancel} className={`flex-1 py-4 border rounded-2xl font-bold transition-all ${secondaryButtonClass}`}>
                                 返回列表
                             </button>
                             <button
-                                disabled={preview.length === 0}
-                                onClick={() => onImport(preview)}
-                                className={`flex-2 py-4 px-8 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all ${preview.length > 0 ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-200' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+                                disabled={!canBatchImport}
+                                onClick={handleBatchImport}
+                                className={`flex-2 py-4 px-8 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all ${canBatchImport ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-200' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
                             >
                                 <Plus size={20} />
-                                立即导入 {preview.length > 0 ? `(${preview.length}条)` : ''}
+                                {importing ? '正在导入...' : '立即导入'} {preview.length > 0 ? `(${preview.length}条)` : ''}
                             </button>
                         </div>
                     </div>
@@ -300,7 +295,7 @@ const ImportView = ({ onImport, onCancel, darkMode = false }) => {
                                 </div>
                             )}
                             <div className="mt-4 pt-4 border-t border-slate-800 text-[10px] text-slate-500 flex justify-between uppercase tracking-widest">
-                                <span>Status: OK</span>
+                                <span>Status: {canBatchImport ? 'READY' : importing ? 'IMPORTING' : parseErrors.length > 0 ? 'INVALID' : 'WAITING'}</span>
                                 <span>Count: {preview.length}</span>
                             </div>
                         </div>

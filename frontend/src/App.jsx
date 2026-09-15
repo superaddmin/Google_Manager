@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
     Users,
     UserPlus,
@@ -9,7 +9,8 @@ import {
     Moon,
     Sun,
     LogOut,
-    MailCheck
+    MailCheck,
+    BarChart3
 } from 'lucide-react';
 
 // 导入服务和组件
@@ -18,6 +19,8 @@ import AccountListView from './components/AccountListView';
 import ImportView from './components/ImportView';
 import LoginPage from './components/LoginPage';
 import GooglemailView from './components/GooglemailView';
+import DashboardView from './components/DashboardView';
+import GmailInboxView from './components/GmailInboxView';
 
 const App = () => {
     const [view, setView] = useState('list');
@@ -30,38 +33,25 @@ const App = () => {
     const [editingAccount, setEditingAccount] = useState(null);
     const [deletingId, setDeletingId] = useState(null);
     const [twoFACode, setTwoFACode] = useState({ id: null, code: '', expiry: 0 });
+    const accountsRequestRef = useRef(0);
+    const notificationTimerRef = useRef(null);
 
-    // 登录状态 - 使用 localStorage 并检查7天有效期
-    const [isLoggedIn, setIsLoggedIn] = useState(() => {
-        const loginData = localStorage.getItem('loginData');
-        if (!loginData) return false;
+    const [isLoggedIn, setIsLoggedIn] = useState(false);
 
+    // 暗色模式状态
+    const [darkMode, setDarkMode] = useState(() => {
         try {
-            const { timestamp } = JSON.parse(loginData);
-            const sevenDaysMs = 7 * 24 * 60 * 60 * 1000; // 7天毫秒数
-            const isValid = Date.now() - timestamp < sevenDaysMs;
-
-            if (!isValid) {
-                // 已过期，清除登录状态
-                localStorage.removeItem('loginData');
-                return false;
-            }
-            return true;
+            return JSON.parse(localStorage.getItem('darkMode')) === true;
         } catch {
             return false;
         }
     });
 
-    // 暗色模式状态
-    const [darkMode, setDarkMode] = useState(() => {
-        // 从 localStorage 读取用户偏好
-        const saved = localStorage.getItem('darkMode');
-        return saved ? JSON.parse(saved) : false;
-    });
-
     // 保存暗色模式设置到 localStorage
     useEffect(() => {
-        localStorage.setItem('darkMode', JSON.stringify(darkMode));
+        try {
+            localStorage.setItem('darkMode', JSON.stringify(darkMode));
+        } catch {}
     }, [darkMode]);
 
     // --- 加载账号数据 ---
@@ -69,27 +59,30 @@ const App = () => {
         if (isLoggedIn) {
             loadAccounts();
         } else {
+            accountsRequestRef.current += 1;
             setAccounts([]);
             setLoading(false);
         }
     }, [isLoggedIn]);
 
     const loadAccounts = async () => {
+        const requestId = ++accountsRequestRef.current;
         try {
             setLoading(true);
             const data = await api.getAccounts();
+            if (requestId !== accountsRequestRef.current) return;
             setAccounts(data);
         } catch (error) {
+            if (requestId !== accountsRequestRef.current) return;
             console.error('加载账号失败:', error);
             if (error.status === 401) {
-                localStorage.removeItem('loginData');
                 setIsLoggedIn(false);
                 showNotification('登录状态已失效，请重新登录', 'error');
                 return;
             }
             showNotification('加载账号失败', 'error');
         } finally {
-            setLoading(false);
+            if (requestId === accountsRequestRef.current) setLoading(false);
         }
     };
 
@@ -111,8 +104,14 @@ const App = () => {
 
     // --- Helpers ---
     const showNotification = (msg, type = 'success') => {
+        if (notificationTimerRef.current) {
+            clearTimeout(notificationTimerRef.current);
+        }
         setNotification({ msg, type });
-        setTimeout(() => setNotification(null), 3000);
+        notificationTimerRef.current = setTimeout(() => {
+            setNotification(null);
+            notificationTimerRef.current = null;
+        }, 3000);
     };
 
     const copyToClipboard = async (text, label) => {
@@ -156,8 +155,8 @@ const App = () => {
         try {
             const result = await api.toggleStatus(id);
             if (result.success) {
-                setAccounts(accounts.map(acc =>
-                    acc.id === id ? result.data : acc
+                setAccounts(current => current.map(acc =>
+                    acc.id === id ? { ...acc, status: result.data.status } : acc
                 ));
             } else {
                 showNotification(result.message || '切换状态失败', 'error');
@@ -180,8 +179,8 @@ const App = () => {
         try {
             const result = await api.toggleSoldStatus(id);
             if (result.success) {
-                setAccounts(accounts.map(acc =>
-                    acc.id === id ? result.data : acc
+                setAccounts(current => current.map(acc =>
+                    acc.id === id ? { ...acc, soldStatus: result.data.soldStatus } : acc
                 ));
                 const status = result.data.soldStatus === 'sold' ? '已售出' : '未售出';
                 showNotification(`账号已标记为${status}`);
@@ -199,7 +198,7 @@ const App = () => {
         try {
             const result = await api.deleteAccount(deletingId);
             if (result.success) {
-                setAccounts(accounts.filter(acc => acc.id !== deletingId));
+                setAccounts(current => current.filter(acc => acc.id !== deletingId));
                 showNotification('账号已删除');
             } else {
                 showNotification(result.message || '删除失败', 'error');
@@ -209,6 +208,65 @@ const App = () => {
             showNotification('删除失败', 'error');
         }
         setDeletingId(null);
+    };
+
+    // --- 批量操作 ---
+    const handleBatchDelete = async (accountIds) => {
+        const confirmed = window.confirm(`确定要批量删除选中的 ${accountIds.length} 个账号吗？\n\n此操作不可撤销，相关修改历史将一并移除。`);
+        if (!confirmed) return false;
+        try {
+            const result = await api.batchDeleteAccounts(accountIds);
+            if (result.success) {
+                await loadAccounts();
+                showNotification(result.message || '批量删除成功');
+                return true;
+            }
+            showNotification(result.message || '批量删除失败', 'error');
+            return false;
+        } catch (error) {
+            console.error('批量删除失败:', error);
+            showNotification(error.message || '批量删除失败', 'error');
+            return false;
+        }
+    };
+
+    const handleBatchSold = async (accountIds, status) => {
+        const label = status === 'sold' ? '已售出' : '未售出';
+        if (status === 'unsold') {
+            const confirmed = window.confirm(`确定要将选中的 ${accountIds.length} 个账号标记为"未售出"吗？\n\n这将撤销之前的售出记录。`);
+            if (!confirmed) return false;
+        }
+        try {
+            const result = await api.batchSetSoldStatus(accountIds, status);
+            if (result.success) {
+                await loadAccounts();
+                showNotification(`已将 ${result.data.updated_count} 个账号标记为${label}`);
+                return true;
+            }
+            showNotification(result.message || '批量更新出售状态失败', 'error');
+            return false;
+        } catch (error) {
+            console.error('批量更新出售状态失败:', error);
+            showNotification(error.message || '批量更新出售状态失败', 'error');
+            return false;
+        }
+    };
+
+    const handleBatchRemark = async (accountIds, remark) => {
+        try {
+            const result = await api.batchSetRemark(accountIds, remark);
+            if (result.success) {
+                await loadAccounts();
+                showNotification(`已更新 ${result.data.updated_count} 个账号的备注`);
+                return true;
+            }
+            showNotification(result.message || '批量更新备注失败', 'error');
+            return false;
+        } catch (error) {
+            console.error('批量更新备注失败:', error);
+            showNotification(error.message || '批量更新备注失败', 'error');
+            return false;
+        }
     };
 
     const handleUpdate = async (e) => {
@@ -225,7 +283,7 @@ const App = () => {
         try {
             const result = await api.updateAccount(editingAccount.id, updated);
             if (result.success) {
-                setAccounts(accounts.map(acc =>
+                setAccounts(current => current.map(acc =>
                     acc.id === editingAccount.id ? result.data : acc
                 ));
                 showNotification('账号信息已更新');
@@ -241,13 +299,17 @@ const App = () => {
 
     const handleLogout = async () => {
         try {
-            await api.logout();
+            const result = await api.logout();
+            if (!result.success) throw new Error('logout failed');
+            setIsLoggedIn(false);
+            setAccounts([]);
+            setEditingAccount(null);
+            setDeletingId(null);
+            setTwoFACode({ id: null, code: '', expiry: 0 });
+            setView('list');
         } catch (error) {
             console.error('退出登录失败:', error);
-        } finally {
-            localStorage.removeItem('loginData');
-            setIsLoggedIn(false);
-            setView('list');
+            showNotification('退出登录失败，请重试', 'error');
         }
     };
 
@@ -255,18 +317,17 @@ const App = () => {
         try {
             const result = await api.batchImport(importedList);
             if (result.success) {
-                // 重新加载账号列表
-                await loadAccounts();
-                setView('list');
-
-                // 显示导入结果
                 const { success_count, failed_count, failed_emails } = result.data;
+                if (success_count > 0) {
+                    await loadAccounts();
+                    setView('list');
+                }
                 if (failed_count > 0) {
                     // 有重复账号
                     const duplicateInfo = failed_emails.slice(0, 3).join('、');
                     const moreInfo = failed_emails.length > 3 ? `等${failed_emails.length}个` : '';
                     showNotification(
-                        `成功导入 ${success_count} 个账号，${failed_count} 个账号已存在：${duplicateInfo}${moreInfo}`,
+                        `${success_count > 0 ? `成功导入 ${success_count} 个账号` : '未新增账号'}，${failed_count} 个账号重复或格式无效：${duplicateInfo}${moreInfo}`,
                         success_count > 0 ? 'success' : 'error'
                     );
                 } else {
@@ -277,7 +338,7 @@ const App = () => {
             }
         } catch (error) {
             console.error('导入失败:', error);
-            showNotification('导入失败', 'error');
+            showNotification(error.message || '导入失败', 'error');
         }
     };
 
@@ -353,6 +414,21 @@ const App = () => {
                                     <MailCheck size={18} />
                                     <span className="font-medium hidden lg:inline">Googlemail</span>
                                 </button>
+                                <button onClick={() => setView('gmail-inbox')} title="Gmail 收件箱" aria-label="Gmail 收件箱"
+                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${view === 'gmail-inbox' ?
+                                        (darkMode ? 'bg-slate-600 shadow-sm text-red-400' : 'bg-white shadow-sm text-red-600')
+                                        : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')}`}
+                                >
+                                    <MailCheck size={18} />
+                                    <span className="font-medium hidden lg:inline">Gmail 收件箱</span>
+                                </button>                                <button onClick={() => setView('dashboard')} title="统计看板" aria-label="统计看板"
+                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${view === 'dashboard' ?
+                                        (darkMode ? 'bg-slate-600 shadow-sm text-indigo-400' : 'bg-white shadow-sm text-indigo-600')
+                                        : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')}`}
+                                >
+                                    <BarChart3 size={18} />
+                                    <span className="font-medium hidden lg:inline">统计看板</span>
+                                </button>
                             </div>
 
                             {/* 暗色模式切换按钮 */}
@@ -393,11 +469,18 @@ const App = () => {
                         toggleSoldStatus={toggleSoldStatus}
                         onEdit={setEditingAccount}
                         onDelete={setDeletingId}
+                        onBatchDelete={handleBatchDelete}
+                        onBatchSold={handleBatchSold}
+                        onBatchRemark={handleBatchRemark}
                         loading={loading}
                         darkMode={darkMode}
                     />
                 ) : view === 'import' ? (
                     <ImportView onImport={handleImport} onCancel={() => setView('list')} darkMode={darkMode} />
+                ) : view === 'gmail-inbox' ? (
+                    <GmailInboxView darkMode={darkMode} />
+                ) : view === 'dashboard' ? (
+                    <DashboardView darkMode={darkMode} />
                 ) : (
                     <GooglemailView
                         accounts={accounts}

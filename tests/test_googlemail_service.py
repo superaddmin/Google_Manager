@@ -14,6 +14,7 @@ from app.models.account_history import AccountHistory
 from app.services.googlemail_service import (
     GooglemailTaskError,
     GooglemailTaskManager,
+    GooglemailTaskRecord,
     GooglemailValidationError,
     normalize_googlemail_options,
 )
@@ -151,6 +152,58 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
         with self.assertRaises(GooglemailValidationError):
             normalize_googlemail_options({"maxRuntimeMinutes": 0})
 
+    def test_options_reject_fractional_nonfinite_and_invalid_containers(self):
+        for options in ([], False, 0, "", {"slowMo": 1.5}, {"slowMo": float("inf")}):
+            with self.subTest(options=options):
+                with self.assertRaises(GooglemailValidationError):
+                    normalize_googlemail_options(options)
+
+    def test_invalid_progress_document_does_not_break_task_status(self):
+        manager = GooglemailTaskManager(project_root=self.project_root)
+        record = GooglemailTaskRecord(
+            task_id="fixture-task",
+            task_dir=self.project_root,
+            input_file=self.project_root / "accounts.txt",
+            output_dir=self.project_root / "output",
+            account_ids_by_email={"fixture@example.test": 1},
+            total_count=1,
+            options={"headless": True},
+        )
+        record.output_dir.mkdir()
+        for progress in ([], None, "invalid", {"completed": [{}], "failed": []}):
+            with self.subTest(progress=progress):
+                (record.output_dir / "progress.json").write_text(json.dumps(progress), encoding="utf-8")
+                task = manager._public_task(record)
+                self.assertEqual(task["pendingCount"], 1)
+
+        record.account_ids_by_email["another@example.test"] = 2
+        record.total_count = 2
+        (record.output_dir / "progress.json").write_text(json.dumps({
+            "completed": ["fixture@example.test", "unknown@example.test"],
+            "failed": ["fixture@example.test", "another@example.test"],
+        }), encoding="utf-8")
+        task = manager._public_task(record)
+        self.assertEqual((task["completedCount"], task["failedCount"], task["pendingCount"]), (1, 1, 0))
+
+    def test_mixed_invalid_results_are_retained_instead_of_deleted(self):
+        account = self.create_account()
+
+        def fake_popen(_command, **kwargs):
+            output_dir = self.write_result(kwargs["env"])
+            with (output_dir / "result.txt").open("a", encoding="utf-8") as output:
+                output.write("incomplete-result\n")
+            return FakeProcess()
+
+        manager = GooglemailTaskManager(
+            project_root=self.project_root, node_path="node-fixture", popen_factory=fake_popen
+        )
+        task = manager.start_task(self.app, [account])
+        task = self.wait_for_terminal_task(manager, task["taskId"])
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(task["errorCode"], "RESULT_SYNC_FAILED")
+        result_file = self.project_root / "runtime" / "tasks" / task["taskId"] / "output" / "result.txt"
+        self.assertTrue(result_file.exists())
+
     def test_completed_task_syncs_secret_and_recovery_without_exposing_them(self):
         account = self.create_account()
         account_id = account.id
@@ -222,6 +275,37 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
             for item in AccountHistory.query.filter_by(account_id=account_id).all()
         }
         self.assertEqual(history_fields, {"secret", "recovery"})
+
+    def test_result_sync_is_atomic_when_a_later_account_is_missing(self):
+        first = self.create_account("first-sync@example.test")
+        second = self.create_account("second-sync@example.test")
+        output_dir = self.project_root / "output"
+        output_dir.mkdir()
+        (output_dir / "result.txt").write_text(
+            "\n".join([
+                "----".join([first.email, first.password, "", "KRUGS4ZANFZSAYJA"]),
+                "----".join([second.email, second.password, "", "MFRGGZDFMZTWQ2LK"]),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        record = GooglemailTaskRecord(
+            task_id="atomic-sync-task",
+            task_dir=self.project_root,
+            input_file=self.project_root / "accounts.txt",
+            output_dir=output_dir,
+            account_ids_by_email={first.email: first.id, second.email: second.id},
+            total_count=2,
+            options={},
+        )
+        db.session.delete(second)
+        db.session.commit()
+
+        manager = GooglemailTaskManager(project_root=self.project_root)
+        with self.assertRaises(ValueError):
+            manager._sync_results(self.app, record)
+
+        db.session.expire_all()
+        self.assertEqual(db.session.get(Account, first.id).secret, "JBSWY3DPEHPK3PXP")
 
     def test_cancel_before_process_registration_terminates_process(self):
         account = self.create_account()

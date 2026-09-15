@@ -9,6 +9,7 @@ import api from '../services/api';
 const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
     const [history, setHistory] = useState([]);
     const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
     const [expandedFields, setExpandedFields] = useState({});
 
     // 字段名称映射
@@ -27,25 +28,30 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
 
     // 加载历史记录
     useEffect(() => {
-        if (isOpen && account) {
-            loadHistory();
-            setExpandedFields({ password: true, secret: true, recovery: true, sold_status: true });
-        }
-    }, [isOpen, account]);
-
-    const loadHistory = async () => {
+        if (!isOpen || !account) return undefined;
+        let active = true;
         setLoading(true);
-        try {
-            const result = await api.getAccountHistory(account.id);
-            if (result.success) {
-                setHistory(result.data);
+        setHistory([]);
+        setError('');
+        setExpandedFields({ password: true, secret: true, recovery: true, sold_status: true });
+        const loadHistory = async () => {
+            try {
+                const result = await api.getAccountHistory(account.id);
+                if (!active) return;
+                if (result.success) {
+                    setHistory(result.data);
+                } else {
+                    setError(result.message || '加载历史记录失败');
+                }
+            } catch (requestError) {
+                if (active) setError('加载历史记录失败，请重新打开重试');
+            } finally {
+                if (active) setLoading(false);
             }
-        } catch (err) {
-            console.error('加载历史记录失败:', err);
-        } finally {
-            setLoading(false);
-        }
-    };
+        };
+        loadHistory();
+        return () => { active = false; };
+    }, [isOpen, account?.id]);
 
     // 切换字段展开状态
     const toggleField = (field) => {
@@ -100,6 +106,7 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
                         </div>
                         <button
                             onClick={onClose}
+                            aria-label="关闭修改历史"
                             className="p-2 hover:bg-white/20 rounded-xl transition-colors"
                         >
                             <X size={20} />
@@ -124,6 +131,8 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
                                 <History className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-purple-600" size={20} />
                             </div>
                         </div>
+                    ) : error ? (
+                        <p role="alert" className="py-16 text-center text-red-500">{error}</p>
                     ) : history.length === 0 ? (
                         <div className={`text-center py-16 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
                             <div className={`w-20 h-20 mx-auto mb-4 rounded-full flex items-center justify-center ${darkMode ? 'bg-slate-700' : 'bg-slate-100'}`}>

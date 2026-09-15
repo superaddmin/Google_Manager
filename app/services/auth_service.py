@@ -4,10 +4,8 @@
 """
 import time
 import hashlib
+import hmac
 from threading import Lock
-
-# 管理员密码（可以修改为您想要的密码）
-ADMIN_PASSWORD = "admin123"
 
 # IP 封禁配置
 MAX_FAILED_ATTEMPTS = 3  # 最大失败次数
@@ -102,7 +100,7 @@ class AuthService:
                 }
     
     @staticmethod
-    def verify_password(password):
+    def verify_password(password, expected_password):
         """
         验证管理员密码
         
@@ -112,7 +110,11 @@ class AuthService:
         Returns:
             是否验证成功
         """
-        return password == ADMIN_PASSWORD
+        if not isinstance(password, str) or not isinstance(expected_password, str):
+            return False
+        if not expected_password:
+            return False
+        return hmac.compare_digest(password, expected_password)
     
     @staticmethod
     def generate_salt(timestamp):

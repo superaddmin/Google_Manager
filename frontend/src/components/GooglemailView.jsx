@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     AlertTriangle,
     CheckCircle2,
+    History,
     Loader2,
     MailCheck,
     Play,
@@ -22,14 +23,24 @@ const statusLabels = {
     cancelled: '已取消',
 };
 
+const numericOptionRules = [
+    { key: 'slowMo', label: '操作延迟', min: 0, max: 5000 },
+    { key: 'accountDelay', label: '账号间隔', min: 0, max: 600000 },
+    { key: 'accountsPerRecovery', label: '恢复邮箱复用数', min: 1, max: 100 },
+    { key: 'maxRuntimeMinutes', label: '最长运行', min: 1, max: 480 },
+];
+
 const GooglemailView = ({ accounts, darkMode, onTaskComplete }) => {
     const [selectedIds, setSelectedIds] = useState([]);
     const [search, setSearch] = useState('');
     const [capability, setCapability] = useState(null);
     const [task, setTask] = useState(null);
+    const [taskHistory, setTaskHistory] = useState([]);
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState('');
+    const pollingRef = useRef(false);
+    const taskRequestTokenRef = useRef(0);
     const [options, setOptions] = useState({
         headless: true,
         slowMo: 200,
@@ -67,34 +78,59 @@ const GooglemailView = ({ accounts, darkMode, onTaskComplete }) => {
             }
         } catch (requestError) {
             console.error('加载 Googlemail 状态失败:', requestError);
-            setError('加载 Googlemail 状态失败');
+            setError(requestError.message || '加载 Googlemail 状态失败');
         } finally {
             setLoading(false);
         }
     };
 
     const refreshTask = async (taskId) => {
+        if (pollingRef.current) return;
+        pollingRef.current = true;
+        const requestToken = ++taskRequestTokenRef.current;
         try {
             const result = await api.getGooglemailTask(taskId);
-            if (result.success) setTask(result.data);
+            if (requestToken === taskRequestTokenRef.current && result.success) {
+                setTask(result.data);
+            }
         } catch (requestError) {
             console.error('刷新 Googlemail 任务失败:', requestError);
+        } finally {
+            pollingRef.current = false;
+        }
+    };
+
+    const loadHistory = async () => {
+        try {
+            const result = await api.getGooglemailTasks(20);
+            if (result.success) {
+                setTaskHistory(result.data || []);
+            }
+        } catch (requestError) {
+            console.error('加载 Googlemail 任务历史失败:', requestError);
         }
     };
 
     useEffect(() => {
         loadStatus();
+        loadHistory();
     }, []);
 
     useEffect(() => {
         if (!isRunning) return undefined;
         const timer = setInterval(() => refreshTask(task.taskId), 1500);
-        return () => clearInterval(timer);
+        return () => {
+            clearInterval(timer);
+            taskRequestTokenRef.current += 1;
+        };
     }, [isRunning, task?.taskId]);
 
     useEffect(() => {
-        if (task?.status === 'completed') onTaskComplete();
-    }, [task?.status]);
+        if (task && terminalStatuses.has(task.status)) {
+            onTaskComplete();
+            loadHistory();
+        }
+    }, [task?.taskId, task?.status]);
 
     const toggleAccount = (accountId) => {
         setSelectedIds(current => current.includes(accountId)
@@ -113,6 +149,13 @@ const GooglemailView = ({ accounts, darkMode, onTaskComplete }) => {
 
     const startTask = async () => {
         if (!selectedIds.length || isRunning) return;
+        const invalidOption = numericOptionRules.find(({ key, min, max }) => (
+            !Number.isInteger(options[key]) || options[key] < min || options[key] > max
+        ));
+        if (invalidOption) {
+            setError(`${invalidOption.label}必须在 ${invalidOption.min} 到 ${invalidOption.max} 之间`);
+            return;
+        }
         const confirmed = window.confirm(`确认启动 Googlemail 任务？\n\n本次将处理 ${selectedIds.length} 个账号。`);
         if (!confirmed) return;
 
@@ -133,7 +176,7 @@ const GooglemailView = ({ accounts, darkMode, onTaskComplete }) => {
             }
         } catch (requestError) {
             console.error('启动 Googlemail 任务失败:', requestError);
-            setError('启动 Googlemail 任务失败');
+            setError(requestError.message || '启动 Googlemail 任务失败');
         } finally {
             setSubmitting(false);
         }
@@ -149,7 +192,7 @@ const GooglemailView = ({ accounts, darkMode, onTaskComplete }) => {
             else setError(result.message || '取消任务失败');
         } catch (requestError) {
             console.error('取消 Googlemail 任务失败:', requestError);
-            setError('取消任务失败');
+            setError(requestError.message || '取消任务失败');
         }
     };
 
@@ -264,6 +307,59 @@ const GooglemailView = ({ accounts, darkMode, onTaskComplete }) => {
                 </section>
             )}
 
+            {taskHistory.length > 0 && (
+                <section className={`border rounded-lg overflow-hidden ${panelClass}`}>
+                    <div className="px-5 py-3 flex items-center gap-2 border-b border-inherit">
+                        <History size={16} className={darkMode ? 'text-slate-400' : 'text-slate-500'} />
+                        <h2 className="font-bold">历史任务</h2>
+                        <span className={`text-xs ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                            （最近 {taskHistory.length} 条）
+                        </span>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                            <thead className={darkMode ? 'bg-slate-900 text-slate-400' : 'bg-slate-50 text-slate-500'}>
+                                <tr>
+                                    <th className="px-4 py-2.5 text-left">开始时间</th>
+                                    <th className="px-3 py-2.5 text-left">状态</th>
+                                    <th className="px-3 py-2.5 text-center">总数</th>
+                                    <th className="px-3 py-2.5 text-center">完成</th>
+                                    <th className="px-3 py-2.5 text-center">失败</th>
+                                    <th className="px-3 py-2.5 text-center">已同步</th>
+                                    <th className="px-3 py-2.5 text-center">待复核</th>
+                                    <th className="px-4 py-2.5 text-left">错误码</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-inherit">
+                                {taskHistory.map(item => (
+                                    <tr key={item.taskId} className={darkMode ? 'hover:bg-slate-700/50' : 'hover:bg-slate-50'}>
+                                        <td className="px-4 py-2.5 font-mono text-xs whitespace-nowrap">
+                                            {item.startedAt || item.createdAt}
+                                        </td>
+                                        <td className="px-3 py-2.5">
+                                            <span className={`inline-flex items-center gap-1.5 text-xs font-bold ${
+                                                item.status === 'completed' ? 'text-green-500'
+                                                    : item.status === 'failed' ? 'text-red-500'
+                                                        : 'text-slate-400'}`}>
+                                                {item.status === 'completed' && <CheckCircle2 size={13} />}
+                                                {item.status === 'failed' && <AlertTriangle size={13} />}
+                                                {statusLabels[item.status] || item.status}
+                                            </span>
+                                        </td>
+                                        <td className="px-3 py-2.5 text-center">{item.totalCount}</td>
+                                        <td className="px-3 py-2.5 text-center text-green-500 font-bold">{item.completedCount}</td>
+                                        <td className="px-3 py-2.5 text-center text-red-500 font-bold">{item.failedCount}</td>
+                                        <td className="px-3 py-2.5 text-center">{item.syncedCount}</td>
+                                        <td className="px-3 py-2.5 text-center">{item.manualReviewCount}</td>
+                                        <td className="px-4 py-2.5 font-mono text-xs text-red-500">{item.errorCode || '-'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            )}
+
             <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-5">
                 <section className={`border rounded-lg overflow-hidden ${panelClass}`}>
                     <div className="p-4 border-b border-inherit flex flex-col sm:flex-row sm:items-center gap-3">
@@ -348,11 +444,19 @@ const GooglemailView = ({ accounts, darkMode, onTaskComplete }) => {
                             <label key={key} className="block text-sm">
                                 <span className={`block mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>{label}</span>
                                 <input
-                                    type="number"
-                                    min={min}
-                                    max={max}
-                                    value={options[key]}
-                                    onChange={event => setOptions(current => ({ ...current, [key]: Number(event.target.value) }))}
+                                type="number"
+                                min={min}
+                                max={max}
+                                step="1"
+                                value={Number.isFinite(options[key]) ? options[key] : ''}
+                                onChange={event => {
+                                    const value = event.target.value;
+                                    const parsed = value === '' ? '' : Number(value);
+                                    setOptions(current => ({
+                                        ...current,
+                                        [key]: Number.isFinite(parsed) ? parsed : '',
+                                    }));
+                                }}
                                     className={`w-full px-3 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500 ${inputClass}`}
                                 />
                             </label>

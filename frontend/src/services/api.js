@@ -120,6 +120,31 @@ const md5 = (string) => {
     return hex(md51(string));
 };
 
+const createApiError = (message, status) => {
+    const error = new Error(message);
+    if (status !== undefined) error.status = status;
+    return error;
+};
+
+const parseJsonResponse = async (res, fallbackMessage) => {
+    try {
+        return await res.json();
+    } catch {
+        throw createApiError(fallbackMessage, res.status);
+    }
+};
+
+const requestJson = async (url, options, fallbackMessage) => {
+    const res = await fetch(url, options);
+    const data = await parseJsonResponse(res, fallbackMessage);
+    if (!res.ok) {
+        const error = createApiError(data.message || fallbackMessage, res.status);
+        error.response = data;
+        throw error;
+    }
+    return data;
+};
+
 const api = {
     // 登录验证（带盐值）
     async login(password) {
@@ -129,13 +154,13 @@ const api = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password, salt })
         });
-        return await res.json();
+        return await parseJsonResponse(res, '登录失败');
     },
 
     // 检查封禁状态
     async checkAuth() {
         const res = await fetch(`${API_BASE}/auth/check`);
-        return await res.json();
+        return await parseJsonResponse(res, '检查登录状态失败');
     },
 
     // 获取所有账号
@@ -143,104 +168,159 @@ const api = {
         const url = search
             ? `${API_BASE}/accounts?search=${encodeURIComponent(search)}`
             : `${API_BASE}/accounts`;
-        const res = await fetch(url);
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-            const error = new Error(data.message || '加载账号失败');
-            error.status = res.status;
-            throw error;
+        const data = await requestJson(url, undefined, '加载账号失败');
+        if (!data.success) {
+            throw createApiError(data.message || '加载账号失败', 200);
         }
         return data.data;
     },
 
     // 批量导入账号
     async batchImport(accounts) {
-        const res = await fetch(`${API_BASE}/accounts/batch`, {
+        return await requestJson(`${API_BASE}/accounts/batch`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ accounts })
-        });
-        return await res.json();
+        }, '批量导入失败');
     },
 
     // 更新账号
     async updateAccount(id, data) {
-        const res = await fetch(`${API_BASE}/accounts/${id}`, {
+        return await requestJson(`${API_BASE}/accounts/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
-        });
-        return await res.json();
+        }, '更新失败');
     },
 
     // 删除账号
     async deleteAccount(id) {
-        const res = await fetch(`${API_BASE}/accounts/${id}`, {
+        return await requestJson(`${API_BASE}/accounts/${id}`, {
             method: 'DELETE'
-        });
-        return await res.json();
+        }, '删除失败');
     },
 
     // 切换状态
     async toggleStatus(id) {
-        const res = await fetch(`${API_BASE}/accounts/${id}/status`, {
+        return await requestJson(`${API_BASE}/accounts/${id}/status`, {
             method: 'PATCH'
-        });
-        return await res.json();
+        }, '切换状态失败');
     },
 
     // 切换出售状态
     async toggleSoldStatus(id) {
-        const res = await fetch(`${API_BASE}/accounts/${id}/sold`, {
+        return await requestJson(`${API_BASE}/accounts/${id}/sold`, {
             method: 'PATCH'
-        });
-        return await res.json();
+        }, '切换出售状态失败');
     },
 
     // 获取 2FA 验证码
     async get2FACode(id) {
-        const res = await fetch(`${API_BASE}/accounts/${id}/2fa`);
-        return await res.json();
+        return await requestJson(`${API_BASE}/accounts/${id}/2fa`, undefined, '获取验证码失败');
     },
 
     // 获取账号修改历史记录
     async getAccountHistory(id) {
-        const res = await fetch(`${API_BASE}/accounts/${id}/history`);
-        return await res.json();
+        return await requestJson(`${API_BASE}/accounts/${id}/history`, undefined, '加载历史记录失败');
+    },
+
+    // 构建导出链接（带当前筛选条件）
+    buildExportUrl(search = '', sold = 'all', format = 'csv') {
+        const params = new URLSearchParams({ format, sold });
+        if (search) params.set('search', search);
+        return `${API_BASE}/accounts/export?${params.toString()}`;
+    },
+
+    // 获取账号资产统计
+    async getStats() {
+        return await requestJson(`${API_BASE}/stats`, undefined, '获取统计信息失败');
+    },
+
+    // 批量删除账号
+    async batchDeleteAccounts(accountIds) {
+        return await requestJson(`${API_BASE}/accounts/batch-delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accountIds })
+        }, '批量删除失败');
+    },
+
+    // 批量设置出售状态
+    async batchSetSoldStatus(accountIds, status) {
+        return await requestJson(`${API_BASE}/accounts/batch-sold`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accountIds, status })
+        }, '批量更新出售状态失败');
+    },
+
+    // 批量设置备注
+    async batchSetRemark(accountIds, remark) {
+        return await requestJson(`${API_BASE}/accounts/batch-remark`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accountIds, remark })
+        }, '批量更新备注失败');
     },
 
     async getGooglemailStatus() {
-        const res = await fetch(`${API_BASE}/googlemail/status`);
-        return await res.json();
+        return await requestJson(`${API_BASE}/googlemail/status`, undefined, '获取 Googlemail 状态失败');
     },
 
     async startGooglemailTask(accountIds, options) {
-        const res = await fetch(`${API_BASE}/googlemail/tasks`, {
+        return await requestJson(`${API_BASE}/googlemail/tasks`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ accountIds, options })
-        });
-        return await res.json();
+        }, '启动 Googlemail 任务失败');
     },
 
     async getGooglemailTask(taskId) {
-        const res = await fetch(`${API_BASE}/googlemail/tasks/${taskId}`);
-        return await res.json();
+        return await requestJson(`${API_BASE}/googlemail/tasks/${taskId}`, undefined, '获取 Googlemail 任务失败');
+    },
+
+    // 获取 Googlemail 任务历史
+    async getGooglemailTasks(limit = 20) {
+        return await requestJson(`${API_BASE}/googlemail/tasks?limit=${limit}`, undefined, '获取 Googlemail 任务历史失败');
     },
 
     async cancelGooglemailTask(taskId) {
-        const res = await fetch(`${API_BASE}/googlemail/tasks/${taskId}/cancel`, {
+        return await requestJson(`${API_BASE}/googlemail/tasks/${taskId}/cancel`, {
             method: 'POST'
-        });
-        return await res.json();
+        }, '取消 Googlemail 任务失败');
     },
 
+    async startGmailOAuth() {
+        return await requestJson(`${API_BASE}/gmail/oauth/start`, undefined, '启动 Gmail 授权失败');
+    },
+
+    async getGmailConnections() {
+        return await requestJson(`${API_BASE}/gmail/connections`, undefined, '获取 Gmail 账号失败');
+    },
+
+    async getGmailMessages(connectionId, query = '') {
+        const params = new URLSearchParams({ maxResults: '20' });
+        if (query) params.set('q', query);
+        return await requestJson(`${API_BASE}/gmail/${connectionId}/messages?${params}`, undefined, '加载 Gmail 收件箱失败');
+    },
+
+    async getGmailMessage(connectionId, messageId) {
+        return await requestJson(`${API_BASE}/gmail/${connectionId}/messages/${messageId}`, undefined, '加载 Gmail 邮件失败');
+    },
+
+    async markGmailMessageRead(connectionId, messageId) {
+        return await requestJson(`${API_BASE}/gmail/${connectionId}/messages/${messageId}/read`, { method: 'PATCH' }, '标记邮件失败');
+    },
+
+    async archiveGmailMessage(connectionId, messageId) {
+        return await requestJson(`${API_BASE}/gmail/${connectionId}/messages/${messageId}/archive`, { method: 'PATCH' }, '归档邮件失败');
+    },
     // 退出登录并清除服务端会话
     async logout() {
         const res = await fetch(`${API_BASE}/auth/logout`, {
             method: 'POST'
         });
-        return await res.json();
+        return await parseJsonResponse(res, '退出登录失败');
     }
 };
 

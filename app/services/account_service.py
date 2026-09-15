@@ -2,10 +2,17 @@
 账号服务模块
 提供账号相关的业务逻辑处理
 """
+import re
+from datetime import datetime
+
 from app import db
-from app.models.account import Account
+from app.models.account import Account, utc_now
 from app.models.account_history import AccountHistory
 from app.utils.totp import generate_totp, get_remaining_seconds
+
+
+EMAIL_PATTERN = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+MAX_BATCH_IMPORT_SIZE = 500
 
 
 def normalize_account_data(data, require_all=False):
@@ -22,6 +29,23 @@ def normalize_account_data(data, require_all=False):
 
     if 'email' in normalized:
         normalized['email'] = normalized['email'].strip()
+        if not EMAIL_PATTERN.fullmatch(normalized['email']):
+            raise ValueError('邮箱格式无效')
+
+    for field, display_name in (('recovery', '恢复邮箱'), ('secret', '2FA 密钥'), ('remark', '备注')):
+        if field in normalized:
+            value = normalized[field]
+            if value is None:
+                normalized[field] = ''
+            elif not isinstance(value, str):
+                raise ValueError(f'{display_name}必须是字符串')
+            elif field == 'recovery':
+                normalized[field] = value.strip()
+                if normalized[field] and not EMAIL_PATTERN.fullmatch(normalized[field]):
+                    raise ValueError('恢复邮箱格式无效')
+
+    if 'status' in normalized and normalized['status'] not in ('inactive', 'pro'):
+        raise ValueError('账号状态必须为 inactive 或 pro')
     return normalized
 
 
@@ -29,18 +53,19 @@ class AccountService:
     """账号服务类"""
     
     @staticmethod
-    def get_all_accounts(search=''):
+    def get_all_accounts(search='', sold_status=None):
         """
-        获取所有账号（支持搜索）
-        
+        获取所有账号（支持搜索与出售状态筛选）
+
         Args:
             search: 搜索关键词
-        
+            sold_status: 出售状态筛选（sold/unsold），None 或其他值表示全部
+
         Returns:
             账号字典列表
         """
         query = Account.query
-        
+
         if search:
             search_pattern = f'%{search}%'
             query = query.filter(
@@ -49,9 +74,200 @@ class AccountService:
                     Account.remark.ilike(search_pattern)
                 )
             )
-        
+
+        if sold_status in ('sold', 'unsold'):
+            query = query.filter(Account.sold_status == sold_status)
+
         accounts = query.order_by(Account.created_at.asc()).all()
         return [acc.to_dict() for acc in accounts]
+
+    @staticmethod
+    def get_statistics():
+        """
+        获取账号资产统计信息
+
+        Returns:
+            包含总量、状态分布、2FA/恢复邮箱覆盖率和近期趋势的字典
+        """
+        from datetime import timedelta
+        from sqlalchemy import func
+
+        trend_days = 14
+        # created_at 以 UTC 存储，changed_at 以本地时间存储，分别按各自时区生成趋势桶
+        import_today = utc_now().date()
+        sale_today = datetime.now().date()
+        import_since = datetime.combine(import_today - timedelta(days=trend_days - 1), datetime.min.time())
+        sale_since = datetime.combine(sale_today - timedelta(days=trend_days - 1), datetime.min.time())
+
+        total = Account.query.count()
+        sold = Account.query.filter(Account.sold_status == 'sold').count()
+        pro = Account.query.filter(Account.status == 'pro').count()
+        with_2fa = Account.query.filter(
+            Account.secret.isnot(None), Account.secret != ''
+        ).count()
+        with_recovery = Account.query.filter(
+            Account.recovery.isnot(None), Account.recovery != ''
+        ).count()
+
+        import_rows = (
+            db.session.query(func.date(Account.created_at), func.count())
+            .filter(Account.created_at >= import_since)
+            .group_by(func.date(Account.created_at))
+            .all()
+        )
+        import_by_date = {str(row[0]): row[1] for row in import_rows}
+
+        sale_rows = (
+            db.session.query(func.date(AccountHistory.changed_at), func.count())
+            .filter(
+                AccountHistory.field_name == 'sold_status',
+                AccountHistory.new_value == 'sold',
+                AccountHistory.changed_at >= sale_since,
+            )
+            .group_by(func.date(AccountHistory.changed_at))
+            .all()
+        )
+        sale_by_date = {str(row[0]): row[1] for row in sale_rows}
+
+        recent_imports = [
+            {'date': (import_today - timedelta(days=trend_days - 1 - offset)).isoformat(),
+             'count': import_by_date.get(
+                 (import_today - timedelta(days=trend_days - 1 - offset)).isoformat(), 0)}
+            for offset in range(trend_days)
+        ]
+        recent_sales = [
+            {'date': (sale_today - timedelta(days=trend_days - 1 - offset)).isoformat(),
+             'count': sale_by_date.get(
+                 (sale_today - timedelta(days=trend_days - 1 - offset)).isoformat(), 0)}
+            for offset in range(trend_days)
+        ]
+
+        return {
+            'total': total,
+            'sold': sold,
+            'unsold': total - sold,
+            'pro': pro,
+            'standard': total - pro,
+            'with2fa': with_2fa,
+            'without2fa': total - with_2fa,
+            'withRecovery': with_recovery,
+            'withoutRecovery': total - with_recovery,
+            'recentImports': recent_imports,
+            'recentSales': recent_sales,
+        }
+
+    @staticmethod
+    def _fetch_accounts_by_ids(account_ids):
+        """按 ID 列表获取账号，校验列表格式。"""
+        if (
+            not isinstance(account_ids, list)
+            or not account_ids
+            or len(account_ids) > MAX_BATCH_IMPORT_SIZE
+            or any(not isinstance(item, int) or isinstance(item, bool) for item in account_ids)
+        ):
+            raise ValueError('账号 ID 列表格式错误')
+        ordered_ids = list(dict.fromkeys(account_ids))
+        account_map = {
+            account.id: account
+            for account in Account.query.filter(Account.id.in_(ordered_ids)).all()
+        }
+        missing_ids = [account_id for account_id in ordered_ids if account_id not in account_map]
+        accounts = [account_map[account_id] for account_id in ordered_ids if account_id in account_map]
+        return accounts, missing_ids
+
+    @staticmethod
+    def batch_delete(account_ids):
+        """
+        批量删除账号
+
+        Args:
+            account_ids: 账号 ID 列表
+
+        Returns:
+            删除结果统计
+        """
+        accounts, missing_ids = AccountService._fetch_accounts_by_ids(account_ids)
+        for account in accounts:
+            db.session.delete(account)
+        db.session.commit()
+        return {
+            'deleted_count': len(accounts),
+            'missing_ids': missing_ids,
+        }
+
+    @staticmethod
+    def batch_set_sold_status(account_ids, target_status):
+        """
+        批量设置出售状态并记录变更历史
+
+        Args:
+            account_ids: 账号 ID 列表
+            target_status: 目标状态（sold/unsold）
+
+        Returns:
+            更新结果统计
+        """
+        if target_status not in ('sold', 'unsold'):
+            raise ValueError('出售状态必须为 sold 或 unsold')
+
+        accounts, missing_ids = AccountService._fetch_accounts_by_ids(account_ids)
+        updated_count = 0
+        unchanged_count = 0
+        for account in accounts:
+            if account.sold_status == target_status:
+                unchanged_count += 1
+                continue
+            history = AccountHistory(
+                account_id=account.id,
+                field_name='sold_status',
+                old_value=account.sold_status,
+                new_value=target_status
+            )
+            db.session.add(history)
+            account.sold_status = target_status
+            updated_count += 1
+        db.session.commit()
+        return {
+            'updated_count': updated_count,
+            'unchanged_count': unchanged_count,
+            'missing_ids': missing_ids,
+        }
+
+    @staticmethod
+    def batch_set_remark(account_ids, remark):
+        """
+        批量设置账号备注
+
+        Args:
+            account_ids: 账号 ID 列表
+            remark: 备注内容
+
+        Returns:
+            更新结果统计
+        """
+        if remark is None:
+            remark = ''
+        if not isinstance(remark, str):
+            raise ValueError('备注必须是字符串')
+        remark = remark.strip()
+        if len(remark) > 255:
+            raise ValueError('备注长度不能超过 255 个字符')
+
+        accounts, missing_ids = AccountService._fetch_accounts_by_ids(account_ids)
+        updated_count = 0
+        unchanged_count = 0
+        for account in accounts:
+            if (account.remark or '') == remark:
+                unchanged_count += 1
+                continue
+            account.remark = remark
+            updated_count += 1
+        db.session.commit()
+        return {
+            'updated_count': updated_count,
+            'unchanged_count': unchanged_count,
+            'missing_ids': missing_ids,
+        }
     
     @staticmethod
     def get_account_by_id(account_id):
@@ -112,6 +328,9 @@ class AccountService:
         Returns:
             导入结果统计
         """
+        if len(accounts) > MAX_BATCH_IMPORT_SIZE:
+            raise ValueError(f'单次最多导入 {MAX_BATCH_IMPORT_SIZE} 个账号')
+
         success_count = 0
         failed_count = 0
         failed_emails = []
@@ -148,7 +367,7 @@ class AccountService:
             except ValueError:
                 failed_count += 1
                 failed_email = data.get('email', '未知') if isinstance(data, dict) else '未知'
-                failed_emails.append(failed_email or '未知')
+                failed_emails.append(failed_email if isinstance(failed_email, str) and failed_email else '未知')
         
         # 提交所有成功的记录
         if success_count > 0:
@@ -162,7 +381,7 @@ class AccountService:
         }
     
     @staticmethod
-    def update_account(account_id, data):
+    def update_account(account_id, data, commit=True):
         """
         更新账号信息
         
@@ -226,7 +445,8 @@ class AccountService:
         if 'status' in data:
             account.status = data['status']
         
-        db.session.commit()
+        if commit:
+            db.session.commit()
         return account.to_dict()
     
     @staticmethod

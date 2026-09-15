@@ -84,7 +84,7 @@ def _iso_now():
 def _bounded_integer(value, name, default, minimum, maximum):
     if value is None or value == '':
         return default
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise GooglemailValidationError(f'{name} 必须是整数')
     try:
         parsed = int(value)
@@ -97,7 +97,8 @@ def _bounded_integer(value, name, default, minimum, maximum):
 
 def normalize_googlemail_options(options=None):
     """规范化主页提交的非敏感运行选项。"""
-    options = options or {}
+    if options is None:
+        options = {}
     if not isinstance(options, dict):
         raise GooglemailValidationError('运行选项格式错误')
 
@@ -398,35 +399,80 @@ class GooglemailTaskManager:
                 record.finished_at = _iso_now()
                 self._refresh_counts(record)
 
+            self._persist_task(app, record)
+
+    def _persist_task(self, app, record):
+        """把已结束的任务写入历史表，失败不影响任务状态。"""
+        from app import db
+        from app.models.googlemail_task import GooglemailTask
+
+        try:
+            public = self._public_task(record)
+            with app.app_context():
+                row = db.session.get(GooglemailTask, record.task_id)
+                if row is None:
+                    row = GooglemailTask(task_id=record.task_id)
+                    db.session.add(row)
+                row.status = public['status']
+                row.total_count = public['totalCount']
+                row.completed_count = public['completedCount']
+                row.failed_count = public['failedCount']
+                row.synced_count = public['syncedCount']
+                row.manual_review_count = public['manualReviewCount']
+                row.exit_code = public['exitCode']
+                row.error_code = public['errorCode']
+                row.headless = public['headless']
+                row.created_at = public['createdAt']
+                row.started_at = public['startedAt']
+                row.finished_at = public['finishedAt']
+                db.session.commit()
+        except Exception:
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            logger = getattr(app, 'logger', None)
+            if logger:
+                logger.warning('Googlemail 任务历史写入失败')
+
     def _sync_results(self, app, record):
         result_file = record.output_dir / 'result.txt'
         if not result_file.is_file():
             return 0
 
+        from app import db
         from app.services.account_service import AccountService
 
         updates = []
         for raw_line in result_file.read_text(encoding='utf-8').splitlines():
+            if not raw_line.strip():
+                continue
             fields = raw_line.split('----')
             if len(fields) != 4:
-                continue
+                raise ValueError('Googlemail 结果文件格式无效')
             email, _password, recovery, secret = fields
             account_id = record.account_ids_by_email.get(email)
-            if account_id and secret:
-                updates.append((account_id, recovery, secret))
+            if not account_id or not secret.strip():
+                raise ValueError('Googlemail 结果文件包含无效账号或密钥')
+            updates.append((account_id, recovery, secret))
 
         if result_file.stat().st_size > 0 and not updates:
             raise ValueError('Googlemail 结果文件格式无效')
 
         synced_count = 0
         with app.app_context():
-            for account_id, recovery, secret in updates:
-                update_data = {'secret': secret}
-                if recovery:
-                    update_data['recovery'] = recovery
-                if not AccountService.update_account(account_id, update_data):
-                    raise ValueError('Googlemail 结果对应账号不存在')
-                synced_count += 1
+            try:
+                for account_id, recovery, secret in updates:
+                    update_data = {'secret': secret}
+                    if recovery:
+                        update_data['recovery'] = recovery
+                    if not AccountService.update_account(account_id, update_data, commit=False):
+                        raise ValueError('Googlemail 结果对应账号不存在')
+                    synced_count += 1
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                raise
         return synced_count
 
     @staticmethod
@@ -445,11 +491,16 @@ class GooglemailTaskManager:
         if progress_file.is_file():
             try:
                 progress = json.loads(progress_file.read_text(encoding='utf-8'))
+                if not isinstance(progress, dict):
+                    raise ValueError('Googlemail 进度文件格式无效')
                 completed = progress.get('completed', [])
                 failed = progress.get('failed', [])
                 if isinstance(completed, list) and isinstance(failed, list):
-                    record.completed_count = min(len(set(completed)), record.total_count)
-                    record.failed_count = min(len(set(failed)), record.total_count)
+                    known_emails = set(record.account_ids_by_email)
+                    completed_emails = set(completed) & known_emails
+                    failed_emails = (set(failed) & known_emails) - completed_emails
+                    record.completed_count = len(completed_emails)
+                    record.failed_count = len(failed_emails)
             except (OSError, ValueError, TypeError):
                 pass
 
@@ -460,7 +511,7 @@ class GooglemailTaskManager:
                     1 for line in manual_review_file.read_text(encoding='utf-8').splitlines()
                     if line.strip()
                 )
-            except OSError:
+            except (OSError, UnicodeError):
                 pass
 
     def _public_task(self, record):
