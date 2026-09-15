@@ -407,6 +407,40 @@ test('an authenticated server session restores the account library without login
   assertPageClean(app);
 });
 
+test('Gmail OAuth configuration errors are shown in the inbox view', async testContext => {
+  const app = await openApp(testContext, {
+    apiRoutes: {
+      'GET /api/auth/check': jsonRoute({
+        success: true,
+        authenticated: true,
+        banned: false,
+      }),
+      'GET /api/accounts': jsonRoute({ success: true, data: [] }),
+      'GET /api/gmail/connections': jsonRoute({ success: true, data: [] }),
+      'GET /api/gmail/oauth/start': jsonRoute({
+        success: false,
+        data: null,
+        message: '未配置有效的 GMAIL_CLIENT_SECRET_FILE',
+      }, 503),
+    },
+  });
+
+  await app.page.getByRole('button', { name: 'Gmail 收件箱' }).click();
+  await waitForVisible(
+    app,
+    app.page.getByRole('heading', { name: 'Gmail 收件箱' }),
+    'the Gmail inbox view did not render',
+  );
+  await app.page.getByRole('button', { name: '授权 Gmail' }).click();
+  await waitForVisible(
+    app,
+    app.page.getByText('未配置有效的 GMAIL_CLIENT_SECRET_FILE', { exact: true }),
+    'the Gmail OAuth configuration error was not shown',
+  );
+  assert.deepEqual(app.pageErrors, [], 'OAuth errors must not become uncaught page errors');
+  assertPageClean(app);
+});
+
 test('account library reveals each password through its own control', async testContext => {
   const account = fakeAccount({
     id: 'first-account',

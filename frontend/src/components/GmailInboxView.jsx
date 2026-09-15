@@ -9,6 +9,7 @@ const GmailInboxView = ({ darkMode }) => {
     const [selected, setSelected] = useState(null);
     const [query, setQuery] = useState('');
     const [loading, setLoading] = useState(false);
+    const [authorizing, setAuthorizing] = useState(false);
     const [error, setError] = useState('');
 
     const loadConnections = async () => {
@@ -31,8 +32,19 @@ const GmailInboxView = ({ darkMode }) => {
     useEffect(() => { loadMessages(); }, [connectionId]);
 
     const authorize = async () => {
-        const result = await api.startGmailOAuth();
-        window.location.href = result.data.authorizationUrl;
+        if (authorizing) return;
+        setAuthorizing(true);
+        setError('');
+        try {
+            const result = await api.startGmailOAuth();
+            const authorizationUrl = result.data?.authorizationUrl;
+            if (!authorizationUrl) throw new Error('Gmail 授权地址为空');
+            window.location.href = authorizationUrl;
+        } catch (authorizeError) {
+            setError(authorizeError.message || '启动 Gmail 授权失败');
+        } finally {
+            setAuthorizing(false);
+        }
     };
 
     const openMessage = async message => {
@@ -52,7 +64,7 @@ const GmailInboxView = ({ darkMode }) => {
         <div className="flex flex-wrap items-center justify-between gap-3">
             <div><h1 className="text-2xl font-bold">Gmail 收件箱</h1><p className="text-sm opacity-70">通过 Gmail API 管理已授权邮箱</p></div>
             <div className="flex gap-2">
-                <button onClick={authorize} className="px-4 py-2 rounded-lg bg-blue-600 text-white"><ExternalLink size={16} className="inline mr-2" />授权 Gmail</button>
+                <button onClick={authorize} disabled={authorizing} className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-60"><ExternalLink size={16} className="inline mr-2" />{authorizing ? '授权中...' : '授权 Gmail'}</button>
                 <button onClick={() => { loadConnections(); loadMessages(); }} className="px-3 py-2 rounded-lg border"><RefreshCw size={16} /></button>
             </div>
         </div>
