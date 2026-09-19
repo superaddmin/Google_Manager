@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from '../googlemail/node_modules/playwright/index.mjs';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const staticRoot = resolve(repositoryRoot, 'static');
+const staticRoot = resolve(process.env.FRONTEND_TEST_DIST || resolve(repositoryRoot, 'static'));
 const contentTypes = {
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
@@ -242,6 +242,155 @@ after(async () => {
       server.close(error => (error ? rejectClose(error) : resolveClose()));
     });
   }
+});
+
+async function openRecharge(testContext, routes = {}, mode = 'mock') {
+  const app = await openApp(testContext, {
+    apiRoutes: {
+      'GET /api/auth/check': jsonRoute({ success: true, authenticated: true, banned: false }),
+      'GET /api/accounts': jsonRoute({ success: true, data: [] }),
+      'GET /api/recharge/config': jsonRoute({ success: true, data: { mode, enabled: true } }),
+      'GET /api/recharge/stats/avg-processing-time': jsonRoute({ success: true, data: [] }),
+      'GET /api/recharge/agreement': jsonRoute({ success: true, data: { content: 'Synthetic agreement' } }),
+      ...routes,
+    },
+  });
+  await app.page.getByRole('button', { name: '充值交付', exact: true }).click();
+  await waitForVisible(app, app.page.getByRole('heading', { name: '充值交付与任务中控' }), 'recharge view');
+  return app;
+}
+
+test('recharge submission binds identical credentials and clears them after success', async testContext => {
+  let challengePayload;
+  const task = { task_no: 'TK-MOCK-UI', redeem_code: 'PLUS-SYNTHETIC-UI', plan_type: 'PLUS', status: 'completed', is_mock: true };
+  const app = await openRecharge(testContext, {
+    'POST /api/recharge/redeem-codes/validate': jsonRoute({ success: true, data: { plan_type: 'PLUS' } }),
+    'POST /api/recharge/submission-challenges': async (route, request) => {
+      challengePayload = request.postDataJSON();
+      await jsonRoute({ success: true, data: { challenge_token: 'synthetic-challenge' } })(route);
+    },
+    'POST /api/recharge/tasks': async (route, request) => {
+      assert.equal(request.postDataJSON().token_input, challengePayload.token_input);
+      await jsonRoute({ success: true, data: task }, 201)(route);
+    },
+    'GET /api/recharge/tasks/TK-MOCK-UI': jsonRoute({ success: true, data: task }),
+    'POST /api/recharge/tasks/lookup': jsonRoute({ success: true, data: task }),
+  });
+  await app.page.getByPlaceholder('请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）').fill(task.redeem_code);
+  await app.page.getByRole('button', { name: '验证卡密', exact: true }).click();
+  await waitForVisible(app, app.page.getByText('卡密已核验有效'), 'verified CDK');
+  const credential = app.page.getByPlaceholder('粘贴来自 chatgpt.com/api/auth/session 的完整 JSON，或输入 user@example.com----sk-ant-sid02-xxx');
+  await credential.fill('synthetic-not-real-credential');
+  await app.page.getByPlaceholder('user@gmail.com', { exact: true }).fill('fixture@example.test');
+  await app.page.getByRole('checkbox', { name: /我已仔细核对/ }).check();
+  await app.page.getByRole('checkbox', { name: /我已完整阅读/ }).check();
+  await app.page.getByRole('button', { name: '同意协议并提交充值任务' }).click();
+  await waitForVisible(app, app.page.getByText('任务提交成功！', { exact: true }), 'created task');
+  assert.equal(await credential.inputValue(), '');
+  await app.page.getByRole('button', { name: '查看履约进度' }).click();
+  const receipt = app.page.getByRole('link', { name: '对账凭证', exact: true });
+  await waitForVisible(app, receipt, 'task receipt link');
+  assert.equal(await receipt.getAttribute('href'), '/api/recharge/tasks/invoice/download?task_no=TK-MOCK-UI');
+  assertPageClean(app);
+});
+
+test('recharge polling retries transient failures and stops at a terminal state', async testContext => {
+  let requests = 0;
+  const completed = deferred();
+  const app = await openRecharge(testContext, {
+    'GET /api/recharge/tasks/TK-MOCK-POLL': async route => {
+      requests += 1;
+      if (requests === 2) {
+        await jsonRoute({ success: false, message: 'Synthetic upstream timeout' }, 502)(route);
+        return;
+      }
+      const terminal = requests >= 3;
+      await jsonRoute({ success: true, data: {
+        task_no: 'TK-MOCK-POLL', plan_type: 'PLUS', status: terminal ? 'completed' : 'unknown',
+        status_text: terminal ? '已核对完成' : '等待核对', is_mock: true,
+      } })(route);
+      if (terminal) completed.resolve();
+    },
+  });
+  await app.page.getByRole('button', { name: '进度查询', exact: true }).click();
+  await app.page.getByPlaceholder('输入 CDK 卡密或任务编号（如 PLUS-XXXX 或 TK-2026...）').fill('TK-MOCK-POLL');
+  await app.page.getByRole('button', { name: '立即查询', exact: true }).click();
+  await waitForVisible(app, app.page.getByText('等待核对', { exact: true }), 'initial lookup state');
+  await waitForSignal(completed.promise, 'retry after a transient recharge failure', 22000);
+  await waitForVisible(app, app.page.getByText('已核对完成', { exact: true }), 'terminal lookup state');
+  await new Promise(resolve => setTimeout(resolve, 5500));
+  assert.equal(requests, 3);
+  assertPageClean(app);
+});
+
+test('recharge polling stops when switching internal tabs', async testContext => {
+  let requests = 0;
+  const app = await openRecharge(testContext, {
+    'GET /api/recharge/tasks/TK-MOCK-TAB': async route => {
+      requests += 1;
+      await jsonRoute({ success: true, data: {
+        task_no: 'TK-MOCK-TAB', plan_type: 'PLUS', status: 'processing',
+        status_text: '测试处理中', is_mock: true,
+      } })(route);
+    },
+  });
+  await app.page.getByRole('button', { name: '进度查询', exact: true }).click();
+  await app.page.getByPlaceholder('输入 CDK 卡密或任务编号（如 PLUS-XXXX 或 TK-2026...）').fill('TK-MOCK-TAB');
+  await app.page.getByRole('button', { name: '立即查询', exact: true }).click();
+  await waitForVisible(app, app.page.getByText('测试处理中', { exact: true }), 'initial lookup result');
+  await app.page.getByRole('button', { name: '账单续费', exact: true }).click();
+  await new Promise(resolve => setTimeout(resolve, 5500));
+  assert.equal(requests, 1, 'leaving the lookup tab cancels its polling timer');
+  assertPageClean(app);
+});
+
+test('recharge discards a billing result after its credential changes', async testContext => {
+  const requested = deferred();
+  const release = deferred();
+  const app = await openRecharge(testContext, {
+    'POST /api/recharge/billing/query': async route => {
+      requested.resolve();
+      await release.promise;
+      await jsonRoute({ success: true, data: { plan_name: 'Stale synthetic plan', is_mock: true } })(route);
+    },
+  });
+  await app.page.getByRole('button', { name: '账单续费', exact: true }).click();
+  const credential = app.page.getByPlaceholder('输入账号 accessToken 或 chatgpt.com/api/auth/session 返回内容');
+  await credential.fill('synthetic-old-token');
+  await app.page.getByRole('button', { name: '查询账单状态', exact: true }).click();
+  await waitForSignal(requested.promise, 'billing request');
+  await credential.fill('synthetic-new-token');
+  release.resolve();
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.equal(await app.page.getByRole('heading', { name: 'Stale synthetic plan' }).count(), 0);
+  assertPageClean(app);
+});
+
+test('recharge live mode does not offer unverified invoice downloads', async testContext => {
+  const app = await openRecharge(testContext, {
+    'GET /api/recharge/tasks/TK-LIVE-UI': jsonRoute({ success: true, data: {
+      task_no: 'TK-LIVE-UI', plan_type: 'PLUS', status: 'completed', is_mock: false,
+    } }),
+    'POST /api/recharge/billing/query': jsonRoute({ success: true, data: {
+      plan_name: 'Synthetic plan', auto_renew: true, is_mock: false,
+      invoices: [{ id: 'remote-invoice', slug: 'remote-invoice', date: 'synthetic' }],
+    } }),
+  }, 'live');
+  await app.page.getByRole('button', { name: '进度查询', exact: true }).click();
+  await app.page.getByPlaceholder('输入 CDK 卡密或任务编号（如 PLUS-XXXX 或 TK-2026...）').fill('TK-LIVE-UI');
+  await app.page.getByRole('button', { name: '立即查询', exact: true }).click();
+  await waitForVisible(app, app.page.getByRole('heading', { name: 'PLUS 履约任务' }), 'live task');
+  assert.equal(await app.page.getByRole('link', { name: '对账凭证' }).count(), 0);
+  await app.page.getByRole('button', { name: '账单续费', exact: true }).click();
+  await app.page.getByPlaceholder('输入账号 accessToken 或 chatgpt.com/api/auth/session 返回内容').fill('synthetic-billing-credential');
+  await app.page.getByRole('button', { name: '查询账单状态', exact: true }).click();
+  await waitForVisible(app, app.page.getByRole('heading', { name: 'Synthetic plan' }), 'live billing result');
+  assert.equal(await app.page.getByRole('link', { name: /下载收据/ }).count(), 0);
+  await app.page.getByRole('button', { name: '进度查询', exact: true }).click();
+  await app.page.getByRole('button', { name: '账单续费', exact: true }).click();
+  assert.equal(await app.page.getByPlaceholder('输入账号 accessToken 或 chatgpt.com/api/auth/session 返回内容').inputValue(), '');
+  assert.equal(await app.page.getByRole('heading', { name: 'Synthetic plan' }).count(), 0);
+  assertPageClean(app);
 });
 
 async function openBatchImport(testContext, batchHandler) {

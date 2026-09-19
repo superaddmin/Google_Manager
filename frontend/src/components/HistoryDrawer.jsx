@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Clock, Key, Mail, Shield, History, ArrowRight, ChevronDown, ChevronUp } from 'lucide-react';
+import { X, Clock, Key, Mail, Shield, History, ArrowRight, ChevronDown, ChevronUp, AlertTriangle, MailCheck } from 'lucide-react';
 import api from '../services/api';
 
 /**
@@ -17,13 +17,23 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
         password: { name: '密码', icon: Key, color: 'green', gradient: 'from-green-500 to-emerald-600' },
         secret: { name: '2FA密钥', icon: Shield, color: 'blue', gradient: 'from-blue-500 to-indigo-600' },
         recovery: { name: '恢复邮箱', icon: Mail, color: 'orange', gradient: 'from-orange-500 to-amber-600' },
-        sold_status: { name: '售出状态', icon: History, color: 'purple', gradient: 'from-purple-500 to-pink-600' }
+        sold_status: { name: '售出状态', icon: History, color: 'purple', gradient: 'from-purple-500 to-pink-600' },
+        status: { name: '账号状态', icon: Shield, color: 'blue', gradient: 'from-blue-600 to-indigo-600' },
+        security_action: { name: '安全应急处置', icon: AlertTriangle, color: 'red', gradient: 'from-red-500 to-rose-600' },
+        gmail_oauth: { name: 'Gmail授权', icon: MailCheck, color: 'emerald', gradient: 'from-teal-500 to-emerald-600' },
     };
 
     // 售出状态值映射
     const soldStatusLabels = {
         'sold': '已售出',
         'unsold': '未售出'
+    };
+
+    // 账号状态值映射
+    const statusLabels = {
+        'inactive': '未开启 (默认)',
+        'pro': 'Pro 专业版',
+        'locked': '已应急锁定保护',
     };
 
     // 加载历史记录
@@ -33,7 +43,15 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
         setLoading(true);
         setHistory([]);
         setError('');
-        setExpandedFields({ password: true, secret: true, recovery: true, sold_status: true });
+        setExpandedFields({
+            password: true,
+            secret: true,
+            recovery: true,
+            sold_status: true,
+            status: true,
+            security_action: true,
+            gmail_oauth: true,
+        });
         const loadHistory = async () => {
             try {
                 const result = await api.getAccountHistory(account.id);
@@ -53,9 +71,12 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
         return () => { active = false; };
     }, [isOpen, account?.id]);
 
-    // 切换字段展开状态
+    // 切换字段展开状态 (默认展开)
     const toggleField = (field) => {
-        setExpandedFields(prev => ({ ...prev, [field]: !prev[field] }));
+        setExpandedFields(prev => ({
+            ...prev,
+            [field]: prev[field] !== undefined ? !prev[field] : false
+        }));
     };
 
     // 按字段分组历史记录
@@ -66,6 +87,9 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
         acc[item.fieldName].push(item);
         return acc;
     }, {});
+
+    // 获取所有待显示的字段键
+    const allFieldKeys = Array.from(new Set([...Object.keys(fieldNames), ...Object.keys(groupedHistory)]));
 
     // 格式化时间显示
     const formatTime = (timeStr) => {
@@ -143,12 +167,18 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
                         </div>
                     ) : (
                         <div className="space-y-4">
-                            {Object.entries(fieldNames).map(([fieldKey, fieldInfo]) => {
+                            {allFieldKeys.map((fieldKey) => {
                                 const records = groupedHistory[fieldKey] || [];
                                 if (records.length === 0) return null;
 
+                                const fieldInfo = fieldNames[fieldKey] || {
+                                    name: fieldKey,
+                                    icon: History,
+                                    color: 'slate',
+                                    gradient: 'from-slate-500 to-slate-600'
+                                };
                                 const FieldIcon = fieldInfo.icon;
-                                const isExpanded = expandedFields[fieldKey];
+                                const isExpanded = expandedFields[fieldKey] !== false;
 
                                 return (
                                     <div key={fieldKey} className={`rounded-2xl overflow-hidden shadow-md ${darkMode ? 'bg-slate-700/50' : 'bg-white'}`}>
@@ -178,10 +208,13 @@ const HistoryDrawer = ({ isOpen, onClose, account, darkMode }) => {
                                             <div className={`px-4 pb-4 space-y-3 ${darkMode ? 'border-t border-slate-600' : 'border-t border-slate-100'}`}>
                                                 {records.map((record, idx) => {
                                                     const { date, time } = formatTime(record.changedAt);
-                                                    // 格式化显示值（售出状态转换为中文）
+                                                    // 格式化显示值（售出状态与账号状态转换为中文）
                                                     const formatValue = (val) => {
                                                         if (fieldKey === 'sold_status') {
                                                             return soldStatusLabels[val] || val;
+                                                        }
+                                                        if (fieldKey === 'status') {
+                                                            return statusLabels[val] || val;
                                                         }
                                                         return val;
                                                     };

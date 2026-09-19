@@ -663,6 +663,83 @@ class ApiTestCase(unittest.TestCase):
             200,
         )
 
+    def test_oauth_callback_endpoint_accessible_without_session(self):
+        # 创建一个全新的未登录客户端
+        unauthed_client = self.app.test_client()
+        # 验证受保护路由返回 401
+        protected_res = unauthed_client.get("/api/accounts")
+        self.assertEqual(protected_res.status_code, 401)
+        self.assertEqual(protected_res.get_json()["message"], "请先登录")
+
+        # 验证 OAuth 回调未被 401 拦截（即使没有管理员 Session，由 OAuth 内部 state 校验负责防护）
+        callback_res = unauthed_client.get("/api/gmail/oauth/callback")
+        self.assertEqual(callback_res.status_code, 400)
+        self.assertIn("Gmail OAuth", callback_res.get_json()["message"])
+
+    def test_account_history_gmail_oauth_field(self):
+        account = self.create_account("oauth_hist@example.test")
+        history = AccountHistory(
+            account_id=account["id"],
+            field_name="gmail_oauth",
+            old_value="",
+            new_value="[自动授权成功] Gmail API 凭证已生成并保存",
+        )
+        db.session.add(history)
+        db.session.commit()
+
+        self.assertEqual(AccountHistory.get_field_display_name("gmail_oauth"), "Gmail授权")
+        saved = AccountHistory.query.filter_by(account_id=account["id"], field_name="gmail_oauth").first()
+        self.assertIsNotNone(saved)
+        self.assertIn("[自动授权成功]", saved.new_value)
+
+
+    def test_locked_account_cannot_toggle_status(self):
+        """测试 Issue 115：locked 状态账号禁止通过通用切换状态接口解锁"""
+        from app.services.security_service import SecurityService
+        account = self.create_account("locked_toggle@example.test")
+        SecurityService.lock_account(account["id"], "测试锁定")
+
+        # 尝试切换状态 -> 必须返回 400 且拒绝解锁
+        res = self.client.patch(f"/api/accounts/{account['id']}/status")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("应急锁定", res.get_json()["message"])
+
+    def test_locked_account_cannot_get_2fa(self):
+        """测试 Issue 115：locked 状态账号禁止读取 2FA 验证码"""
+        from app.services.security_service import SecurityService
+        account = self.create_account("locked_2fa@example.test")
+        SecurityService.lock_account(account["id"], "测试锁定")
+
+        res = self.client.get(f"/api/accounts/{account['id']}/2fa")
+        self.assertEqual(res.status_code, 403)
+        self.assertIn("应急锁定", res.get_json()["message"])
+
+    def test_locked_account_credentials_masked_in_export(self):
+        """测试 Issue 115：导出账号时 locked 账号密码与 2FA 密钥脱敏为 ******"""
+        from app.services.security_service import SecurityService
+        account = self.create_account("locked_export@example.test")
+        SecurityService.lock_account(account["id"], "测试锁定")
+
+        # 1. JSON 格式导出
+        res_json = self.client.get("/api/accounts/export?format=json")
+        self.assertEqual(res_json.status_code, 200)
+        items = res_json.get_json()
+        target = next((item for item in items if item["email"] == "locked_export@example.test"), None)
+        self.assertIsNotNone(target)
+        self.assertEqual(target["password"], "******")
+        self.assertEqual(target["secret"], "******")
+
+        # 2. TXT 格式导出
+        res_txt = self.client.get("/api/accounts/export?format=txt")
+        self.assertEqual(res_txt.status_code, 200)
+        txt_content = res_txt.data.decode("utf-8")
+        self.assertIn("locked_export@example.test----******----", txt_content)
+
+        # 3. CSV 格式导出
+        res_csv = self.client.get("/api/accounts/export?format=csv")
+        self.assertEqual(res_csv.status_code, 200)
+        csv_content = res_csv.data.decode("utf-8-sig")
+        self.assertIn("locked_export@example.test,******,", csv_content)
 
 if __name__ == "__main__":
     unittest.main()

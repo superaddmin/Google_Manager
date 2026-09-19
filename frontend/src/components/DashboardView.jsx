@@ -102,25 +102,31 @@ const DashboardView = ({ darkMode }) => {
         },
     ] : [];
 
-    const renderTrendBars = (series) => (
-        <div className="flex items-end gap-1.5 h-32 mt-4">
-            {series.map(item => (
-                <div key={item.date} className="flex-1 flex flex-col items-center gap-1 group relative">
-                    <span className={`text-[10px] font-bold opacity-0 group-hover:opacity-100 transition-opacity ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-                        {item.count}
-                    </span>
-                    <div
-                        className="w-full rounded-t-md bg-blue-500/80 transition-all group-hover:bg-blue-500 min-h-[2px]"
-                        style={{ height: `${Math.max((item.count / trendMax) * 100, 1.5)}%` }}
-                        title={`${item.date}：${item.count}`}
-                    />
-                    <span className={`text-[9px] ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                        {item.date.slice(5)}
-                    </span>
-                </div>
-            ))}
-        </div>
-    );
+    const renderTrendBars = (series, color = 'indigo') => {
+        const barColorClass = color === 'emerald'
+            ? 'bg-emerald-500/80 group-hover:bg-emerald-500'
+            : 'bg-indigo-500/80 group-hover:bg-indigo-500';
+
+        return (
+            <div className="flex items-end gap-1.5 h-32 mt-4">
+                {series.map(item => (
+                    <div key={item.date} className="flex-1 flex flex-col items-center gap-1 group relative">
+                        <span className={`text-[10px] font-bold opacity-0 group-hover:opacity-100 transition-opacity ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                            {item.count}
+                        </span>
+                        <div
+                            className={`w-full rounded-t-md transition-all min-h-[2px] ${barColorClass}`}
+                            style={{ height: `${Math.max((item.count / trendMax) * 100, 1.5)}%` }}
+                            title={`${item.date}：${item.count}`}
+                        />
+                        <span className={`text-[9px] ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                            {item.date.slice(5)}
+                        </span>
+                    </div>
+                ))}
+            </div>
+        );
+    };
 
     return (
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -144,7 +150,11 @@ const DashboardView = ({ darkMode }) => {
             </div>
 
             {error && (
-                <div className="flex items-center gap-3 px-4 py-3 bg-red-50 border border-red-200 text-red-700 rounded-lg">
+                <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border ${
+                    darkMode
+                        ? 'bg-red-950/40 border-red-800/60 text-red-300'
+                        : 'bg-red-50 border-red-200 text-red-700'
+                }`}>
                     <AlertTriangle size={18} />
                     <span className="text-sm">{error}</span>
                 </div>
@@ -175,12 +185,18 @@ const DashboardView = ({ darkMode }) => {
 
                     <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                         <section className={`rounded-2xl border p-5 shadow-sm ${panelClass}`}>
-                            <h2 className={`font-bold ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>导入趋势（近 14 天）</h2>
-                            {renderTrendBars(stats.recentImports)}
+                            <div className="flex items-center justify-between">
+                                <h2 className={`font-bold ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>导入趋势（近 14 天）</h2>
+                                <span className="text-xs px-2 py-0.5 rounded font-medium bg-indigo-500/10 text-indigo-400">入库</span>
+                            </div>
+                            {renderTrendBars(stats.recentImports, 'indigo')}
                         </section>
                         <section className={`rounded-2xl border p-5 shadow-sm ${panelClass}`}>
-                            <h2 className={`font-bold ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>售出趋势（近 14 天）</h2>
-                            {renderTrendBars(stats.recentSales)}
+                            <div className="flex items-center justify-between">
+                                <h2 className={`font-bold ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>售出趋势（近 14 天）</h2>
+                                <span className="text-xs px-2 py-0.5 rounded font-medium bg-emerald-500/10 text-emerald-400">售出</span>
+                            </div>
+                            {renderTrendBars(stats.recentSales, 'emerald')}
                         </section>
                     </div>
 

@@ -44,8 +44,8 @@ def normalize_account_data(data, require_all=False):
                 if normalized[field] and not EMAIL_PATTERN.fullmatch(normalized[field]):
                     raise ValueError('恢复邮箱格式无效')
 
-    if 'status' in normalized and normalized['status'] not in ('inactive', 'pro'):
-        raise ValueError('账号状态必须为 inactive 或 pro')
+    if 'status' in normalized and normalized['status'] not in ('inactive', 'pro', 'locked'):
+        raise ValueError('账号状态必须为 inactive、pro 或 locked')
     return normalized
 
 
@@ -398,6 +398,10 @@ class AccountService:
 
         data = normalize_account_data(data)
         
+        # 应急锁定状态保护
+        if account.status == 'locked' and ('status' in data or 'password' in data or 'secret' in data):
+            raise ValueError('账号处于应急锁定状态，禁止修改状态或敏感凭据')
+
         # 如果更新邮箱，检查是否与其他账号冲突
         if 'email' in data and data['email'] != account.email:
             existing = Account.query.filter_by(email=data['email']).first()
@@ -483,6 +487,9 @@ class AccountService:
         if not account:
             return None
         
+        if account.status == 'locked':
+            raise ValueError('账号已处于应急锁定状态，禁止切换状态')
+
         # 切换状态
         account.status = 'inactive' if account.status == 'pro' else 'pro'
         db.session.commit()
@@ -538,6 +545,9 @@ class AccountService:
         if not account or not account.secret:
             return None
         
+        if account.status == 'locked':
+            raise ValueError('账号已处于应急锁定状态，禁止读取 2FA 验证码')
+
         try:
             code = generate_totp(account.secret)
             remaining = get_remaining_seconds()

@@ -315,6 +315,191 @@ const api = {
     async archiveGmailMessage(connectionId, messageId) {
         return await requestJson(`${API_BASE}/gmail/${connectionId}/messages/${messageId}/archive`, { method: 'PATCH' }, '归档邮件失败');
     },
+
+    // 集中安全与防盗 API
+    async getSecurityOverview() {
+        return await requestJson(`${API_BASE}/security/overview`, undefined, '加载安全总览失败');
+    },
+
+    async getSecurityAccounts(filter = 'all') {
+        const params = new URLSearchParams({ filter });
+        return await requestJson(`${API_BASE}/security/accounts?${params}`, undefined, '加载安全账号列表失败');
+    },
+
+    async auditForwardingRules() {
+        return await requestJson(`${API_BASE}/security/forwarding-audit`, undefined, '扫描外部转发规则失败');
+    },
+
+    async getCentralOTPs(limit = 10) {
+        const params = new URLSearchParams({ limit: String(limit) });
+        return await requestJson(`${API_BASE}/security/central-otps?${params}`, undefined, '加载集中验证码失败');
+    },
+
+    async emergencyLockAccount(accountId, reason = '异常防盗锁定') {
+        return await requestJson(`${API_BASE}/security/accounts/${accountId}/lock`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason })
+        }, '应急锁定失败');
+    },
+
+    async unlockAccount(accountId) {
+        return await requestJson(`${API_BASE}/security/accounts/${accountId}/unlock`, {
+            method: 'POST'
+        }, '解除锁定失败');
+    },
+
+    // 批量 OAuth 2.0 自动授权与挂机收信 API
+    async startBatchOAuth(accountIds, options = {}) {
+        return await requestJson(`${API_BASE}/gmail/batch-authorize`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accountIds, options })
+        }, '启动批量自动授权失败');
+    },
+
+    async getBatchOAuthStatus() {
+        return await requestJson(`${API_BASE}/gmail/batch-authorize/status`, undefined, '获取批量授权状态失败');
+    },
+
+    async cancelBatchOAuth(taskId) {
+        return await requestJson(`${API_BASE}/gmail/batch-authorize/cancel`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ taskId })
+        }, '取消批量授权失败');
+    },
+
+    async getGmailDaemonStatus() {
+        return await requestJson(`${API_BASE}/gmail/daemon/status`, undefined, '获取挂机收信状态失败');
+    },
+
+    async startGmailDaemon(intervalSeconds = 180) {
+        return await requestJson(`${API_BASE}/gmail/daemon/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ intervalSeconds })
+        }, '启动挂机收信失败');
+    },
+
+    async stopGmailDaemon() {
+        return await requestJson(`${API_BASE}/gmail/daemon/stop`, {
+            method: 'POST'
+        }, '停止挂机收信失败');
+    },
+
+    async syncGmailDaemonNow() {
+        return await requestJson(`${API_BASE}/gmail/daemon/sync-now`, {
+            method: 'POST'
+        }, '立即触发全量同步失败');
+    },
+
+    // 充值与交付管理 API
+    async getRechargeConfig() {
+        return await requestJson(`${API_BASE}/recharge/config`, undefined, '获取充值配置失败');
+    },
+
+    async getRechargeAgreement() {
+        return await requestJson(`${API_BASE}/recharge/agreement`, undefined, '获取充值协议失败');
+    },
+
+    async getRechargeAvgTime(product = 'gpt', category = 'card') {
+        return await requestJson(`${API_BASE}/recharge/stats/avg-processing-time?product=${product}&category=${category}`, undefined, '获取平均耗时失败');
+    },
+
+    async validateRedeemCode(redeemCode) {
+        return await requestJson(`${API_BASE}/recharge/redeem-codes/validate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ redeem_code: redeemCode })
+        }, 'CDK 卡密验证失败');
+    },
+
+    async getSubmissionChallenge(redeemCode, payload = {}) {
+        return await requestJson(`${API_BASE}/recharge/submission-challenges`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ redeem_code: redeemCode, ...payload })
+        }, '获取校验令牌失败');
+    },
+
+    async createRechargeTask(taskPayload) {
+        return await requestJson(`${API_BASE}/recharge/tasks`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(taskPayload)
+        }, '提交充值任务失败');
+    },
+
+    async getRechargeTask(taskNo, options = {}) {
+        return await requestJson(`${API_BASE}/recharge/tasks/${encodeURIComponent(taskNo)}`, {
+            method: 'GET',
+            signal: options.signal
+        }, '获取任务详情失败');
+    },
+
+    async lookupRechargeTask(query, options = {}) {
+        const trimmed = String(query || '').trim();
+        if (trimmed.toUpperCase().startsWith('TK-') || trimmed.toUpperCase().startsWith('TASK-')) {
+            return await this.getRechargeTask(trimmed, options);
+        }
+        return await requestJson(`${API_BASE}/recharge/tasks/lookup`, {
+            method: 'POST',
+            signal: options.signal,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ redeem_code: trimmed })
+        }, '查询任务进度失败');
+    },
+
+    async lookupBatchRechargeTasks(redeemCodes) {
+        return await requestJson(`${API_BASE}/recharge/tasks/lookup-batch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ redeem_codes: redeemCodes })
+        }, '批量查询任务失败');
+    },
+
+    async recallRechargeTask(redeemCode, email, confirmed = true) {
+        return await requestJson(`${API_BASE}/recharge/tasks/recall`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ redeem_code: redeemCode, email, confirmed })
+        }, '撤回任务失败');
+    },
+
+    async closeRechargeTask(redeemCode, email, confirmed = true) {
+        return await requestJson(`${API_BASE}/recharge/tasks/close`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ redeem_code: redeemCode, email, confirmed })
+        }, '关闭任务失败');
+    },
+
+    async queryBilling(tokenInput, options = {}) {
+        return await requestJson(`${API_BASE}/recharge/billing/query`, {
+            method: 'POST',
+            signal: options.signal,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token_input: tokenInput })
+        }, '查询账单信息失败');
+    },
+
+    async cancelSubscription(tokenInput, confirmed = true) {
+        return await requestJson(`${API_BASE}/recharge/billing/cancel-subscription`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token_input: tokenInput, confirmed })
+        }, '取消自动续费失败');
+    },
+
+    async resumeSubscription(tokenInput, confirmed = true) {
+        return await requestJson(`${API_BASE}/recharge/billing/resume-subscription`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token_input: tokenInput, confirmed })
+        }, '恢复自动续费失败');
+    },
+
     // 退出登录并清除服务端会话
     async logout() {
         const res = await fetch(`${API_BASE}/auth/logout`, {

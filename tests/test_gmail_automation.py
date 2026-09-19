@@ -49,6 +49,8 @@ class GmailAutomationApiTestCase(unittest.TestCase):
         return response.get_json()['data']
 
     def test_oauth_start_and_callback_keep_state_without_exposing_token(self):
+        from app.services.gmail_service import OAuthStateManager
+        OAuthStateManager.register('state-1')
         with patch(
             'app.routes.api.GmailService.authorization_url',
             return_value=('https://accounts.google.test/auth', 'state-1'),
@@ -71,6 +73,7 @@ class GmailAutomationApiTestCase(unittest.TestCase):
 
         with self.client.session_transaction() as session:
             session['gmail_oauth_state'] = 'state-2'
+        OAuthStateManager.register('state-2')
         missing_code = self.client.get('/api/gmail/oauth/callback?state=state-2')
         self.assertEqual(missing_code.status_code, 400)
 

@@ -2,6 +2,9 @@
 应用启动入口
 """
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 from app import create_app
 
 # 确保实例目录存在

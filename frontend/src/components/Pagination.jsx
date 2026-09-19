@@ -119,7 +119,7 @@ const Pagination = ({
                                 key={page}
                                 onClick={() => onPageChange(page)}
                                 className={`min-w-[36px] h-9 px-3 rounded-lg font-medium transition-all ${page === currentPage
-                                    ? 'bg-blue-600 text-white shadow-md shadow-blue-200'
+                                    ? `bg-blue-600 text-white shadow-md ${darkMode ? 'shadow-blue-950/50' : 'shadow-blue-200'}`
                                     : (darkMode ? 'text-slate-300 hover:bg-slate-700 hover:text-blue-400' : 'text-slate-600 hover:bg-slate-200 hover:text-blue-600')
                                     }`}
                             >

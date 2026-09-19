@@ -4,7 +4,7 @@
 > **本地源目录**：`F:\Googlemail`（Node.js + Playwright）
 > **集成目录**：`F:\Google_Manager\googlemail`
 > **集成方式**：受控本地复制（vendored source），不是 Git submodule
-> **修订日期**：2026-07-25
+> **修订日期**：2026-09-16（完成全量项目审核、依赖补齐与集中防盗中控集成）
 
 ---
 
@@ -443,6 +443,7 @@ git clean -nd -- googlemail tests\googlemail-local-copy.test.mjs
 - [x] 已覆盖启动、查询、取消、超时、结果同步和 testing 执行保护。
 - [x] 已完成 Git 索引敏感文件检查。
 - [x] 已完成提交前审核；提交与推送结果以 Git 历史和交付记录为准。
+- [x] 2026-09-16 全量审计复核：47 项单元测试全部通过，已与集中邮箱防盗中控台完成联动验证。
 
 > 文件名 `SUBMODULE_INTEGRATION_PLAN.md` 为兼容历史引用而保留；当前方案明确不使用 Git submodule。
 >

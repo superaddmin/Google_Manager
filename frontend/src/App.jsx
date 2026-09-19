@@ -3,6 +3,7 @@ import {
     Users,
     UserPlus,
     ShieldCheck,
+    ShieldAlert,
     X,
     CheckCircle2,
     AlertTriangle,
@@ -10,7 +11,8 @@ import {
     Sun,
     LogOut,
     MailCheck,
-    BarChart3
+    BarChart3,
+    CreditCard
 } from 'lucide-react';
 
 // 导入服务和组件
@@ -21,6 +23,8 @@ import LoginPage from './components/LoginPage';
 import GooglemailView from './components/GooglemailView';
 import DashboardView from './components/DashboardView';
 import GmailInboxView from './components/GmailInboxView';
+import SecurityCenterView from './components/SecurityCenterView';
+import RechargeView from './components/RechargeView';
 
 const App = () => {
     const [view, setView] = useState('list');
@@ -47,11 +51,14 @@ const App = () => {
         }
     });
 
-    // 保存暗色模式设置到 localStorage
+    // 保存暗色模式设置到 localStorage 并同步 documentElement class
     useEffect(() => {
         try {
             localStorage.setItem('darkMode', JSON.stringify(darkMode));
         } catch {}
+        if (typeof document !== 'undefined') {
+            document.documentElement.classList.toggle('dark', Boolean(darkMode));
+        }
     }, [darkMode]);
 
     // --- 加载账号数据 ---
@@ -168,7 +175,6 @@ const App = () => {
     };
 
     const toggleSoldStatus = async (id, currentStatus) => {
-        // 如果当前是已售出状态，点击后要切换为未售出，需要二次确认
         if (currentStatus === 'sold') {
             const confirmed = window.confirm('确定要将该账号标记为"未售出"吗？\n\n这将撤销之前的售出记录。');
             if (!confirmed) {
@@ -323,7 +329,6 @@ const App = () => {
                     setView('list');
                 }
                 if (failed_count > 0) {
-                    // 有重复账号
                     const duplicateInfo = failed_emails.slice(0, 3).join('、');
                     const moreInfo = failed_emails.length > 3 ? `等${failed_emails.length}个` : '';
                     showNotification(
@@ -349,107 +354,105 @@ const App = () => {
         );
     }, [accounts, search]);
 
-    const globalFontStyle = {
-        fontFamily: '"Times New Roman", Times, serif',
-    };
-
     // 未登录时显示登录页面
     if (!isLoggedIn) {
         return <LoginPage onLoginSuccess={() => setIsLoggedIn(true)} darkMode={darkMode} />;
     }
 
     return (
-        <div className={`min-h-screen transition-colors duration-300 ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-800'}`} style={globalFontStyle}>
-            <style>
-                {
-                    ` * {
-                    font-family: "Times New Roman", Times, serif !important;
-                }
-
-                .font-mono {
-                    font-family: ui-monospace, monospace !important;
-                }
-
-                `
-                }
-            </style>
-
-            <nav className={`${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'} border-b sticky top-0 z-30 transition-colors duration-300`}>
+        <div className={`min-h-screen transition-colors duration-300 ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-800'}`}>
+            <nav className={`${darkMode ? 'bg-slate-800/90 border-slate-700/80' : 'bg-white/90 border-slate-200/80'} border-b sticky top-0 z-30 backdrop-blur-md transition-colors duration-300`}>
                 <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8">
                     <div className="flex justify-between h-16 items-center">
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                            <div className="bg-blue-600 p-2 rounded-lg">
-                                <ShieldCheck className="text-white w-6 h-6" />
+                        <div className="flex items-center gap-3 flex-shrink-0">
+                            <div className="bg-gradient-to-tr from-blue-600 to-indigo-600 p-2.5 rounded-xl shadow-md shadow-blue-500/20">
+                                <ShieldCheck className="text-white w-5 h-5" />
                             </div>
                             <span
-                                className={`hidden sm:inline-block text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r ${darkMode ? 'from-blue-400 to-indigo-400' : 'from-blue-600 to-indigo-600'}`}>
+                                className={`hidden sm:inline-block text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r ${darkMode ? 'from-blue-400 via-indigo-300 to-cyan-300' : 'from-blue-600 via-indigo-600 to-cyan-600'}`}>
                                 GoogleManager
                             </span>
                         </div>
 
-                        <div className="flex items-center gap-1 sm:gap-4 min-w-0">
-
-                            <div className={`flex gap-1 ${darkMode ? 'bg-slate-700' : 'bg-slate-100'} p-1 rounded-xl`}>
+                        <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
+                            <div className={`flex gap-1 ${darkMode ? 'bg-slate-800 border border-slate-700/60' : 'bg-slate-100/90 border border-slate-200/60'} p-1 rounded-xl shadow-inner`}>
                                 <button onClick={() => setView('list')} title="账号列表" aria-label="账号列表"
-                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${view === 'list' ?
-                                        (darkMode ? 'bg-slate-600 shadow-sm text-blue-400' : 'bg-white shadow-sm text-blue-600')
-                                        : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')}`}
+                                    className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-sm transition-all ${view === 'list' ?
+                                        (darkMode ? 'bg-slate-700 text-blue-400 shadow-sm font-semibold' : 'bg-white text-blue-600 shadow-sm font-semibold')
+                                        : (darkMode ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50' : 'text-slate-600 hover:text-slate-900 hover:bg-white/60')}`}
                                 >
-                                    <Users size={18} />
-                                    <span className="font-medium hidden sm:inline">账号列表</span>
+                                    <Users size={16} />
+                                    <span className="hidden sm:inline">账号列表</span>
                                 </button>
                                 <button onClick={() => setView('import')} title="导入账号" aria-label="导入账号"
-                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${view === 'import' ?
-                                        (darkMode ? 'bg-slate-600 shadow-sm text-blue-400' : 'bg-white shadow-sm text-blue-600')
-                                        : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')}`}
+                                    className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-sm transition-all ${view === 'import' ?
+                                        (darkMode ? 'bg-slate-700 text-blue-400 shadow-sm font-semibold' : 'bg-white text-blue-600 shadow-sm font-semibold')
+                                        : (darkMode ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50' : 'text-slate-600 hover:text-slate-900 hover:bg-white/60')}`}
                                 >
-                                    <UserPlus size={18} />
-                                    <span className="font-medium hidden sm:inline">导入账号</span>
+                                    <UserPlus size={16} />
+                                    <span className="hidden sm:inline">导入账号</span>
                                 </button>
                                 <button onClick={() => setView('googlemail')} title="Googlemail" aria-label="Googlemail"
-                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${view === 'googlemail' ?
-                                        (darkMode ? 'bg-slate-600 shadow-sm text-cyan-400' : 'bg-white shadow-sm text-cyan-600')
-                                        : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')}`}
+                                    className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-sm transition-all ${view === 'googlemail' ?
+                                        (darkMode ? 'bg-slate-700 text-cyan-400 shadow-sm font-semibold' : 'bg-white text-cyan-600 shadow-sm font-semibold')
+                                        : (darkMode ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50' : 'text-slate-600 hover:text-slate-900 hover:bg-white/60')}`}
                                 >
-                                    <MailCheck size={18} />
-                                    <span className="font-medium hidden lg:inline">Googlemail</span>
+                                    <MailCheck size={16} />
+                                    <span className="hidden lg:inline">Googlemail</span>
                                 </button>
                                 <button onClick={() => setView('gmail-inbox')} title="Gmail 收件箱" aria-label="Gmail 收件箱"
-                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${view === 'gmail-inbox' ?
-                                        (darkMode ? 'bg-slate-600 shadow-sm text-red-400' : 'bg-white shadow-sm text-red-600')
-                                        : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')}`}
+                                    className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-sm transition-all ${view === 'gmail-inbox' ?
+                                        (darkMode ? 'bg-slate-700 text-indigo-400 shadow-sm font-semibold' : 'bg-white text-indigo-600 shadow-sm font-semibold')
+                                        : (darkMode ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50' : 'text-slate-600 hover:text-slate-900 hover:bg-white/60')}`}
                                 >
-                                    <MailCheck size={18} />
-                                    <span className="font-medium hidden lg:inline">Gmail 收件箱</span>
-                                </button>                                <button onClick={() => setView('dashboard')} title="统计看板" aria-label="统计看板"
-                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${view === 'dashboard' ?
-                                        (darkMode ? 'bg-slate-600 shadow-sm text-indigo-400' : 'bg-white shadow-sm text-indigo-600')
-                                        : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')}`}
+                                    <MailCheck size={16} />
+                                    <span className="hidden lg:inline">Gmail 收件箱</span>
+                                </button>
+                                <button onClick={() => setView('dashboard')} title="统计看板" aria-label="统计看板"
+                                    className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-sm transition-all ${view === 'dashboard' ?
+                                        (darkMode ? 'bg-slate-700 text-blue-400 shadow-sm font-semibold' : 'bg-white text-blue-600 shadow-sm font-semibold')
+                                        : (darkMode ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50' : 'text-slate-600 hover:text-slate-900 hover:bg-white/60')}`}
                                 >
-                                    <BarChart3 size={18} />
-                                    <span className="font-medium hidden lg:inline">统计看板</span>
+                                    <BarChart3 size={16} />
+                                    <span className="hidden lg:inline">统计看板</span>
+                                </button>
+                                <button onClick={() => setView('security')} title="安全防盗" aria-label="安全防盗"
+                                    className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-sm transition-all ${view === 'security' ?
+                                        (darkMode ? 'bg-slate-700 text-rose-400 shadow-sm font-semibold' : 'bg-white text-rose-600 shadow-sm font-semibold')
+                                        : (darkMode ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50' : 'text-slate-600 hover:text-slate-900 hover:bg-white/60')}`}
+                                >
+                                    <ShieldAlert size={16} />
+                                    <span className="hidden lg:inline">安全防盗</span>
+                                </button>
+                                <button onClick={() => setView('recharge')} title="充值交付" aria-label="充值交付"
+                                    className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-sm transition-all ${view === 'recharge' ?
+                                        (darkMode ? 'bg-slate-700 text-emerald-400 shadow-sm font-semibold' : 'bg-white text-emerald-600 shadow-sm font-semibold')
+                                        : (darkMode ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50' : 'text-slate-600 hover:text-slate-900 hover:bg-white/60')}`}
+                                >
+                                    <CreditCard size={16} />
+                                    <span className="hidden lg:inline">充值交付</span>
                                 </button>
                             </div>
 
                             {/* 暗色模式切换按钮 */}
                             <button
                                 onClick={() => setDarkMode(!darkMode)}
-                                className={`p-2.5 rounded-xl transition-all ${darkMode
-                                    ? 'bg-slate-700 text-yellow-400 hover:bg-slate-600'
-                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                className={`p-2.5 rounded-xl border transition-all ${darkMode
+                                    ? 'bg-slate-800 border-slate-700 text-amber-400 hover:bg-slate-700'
+                                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}
                                 title={darkMode ? '切换亮色模式' : '切换暗色模式'}
                             >
-                                {darkMode ? <Sun size={20} /> : <Moon size={20} />}
+                                {darkMode ? <Sun size={18} /> : <Moon size={18} />}
                             </button>
 
                             <button
                                 onClick={handleLogout}
-                                className={`p-2.5 rounded-xl transition-all ${darkMode
-                                    ? 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                className={`p-2.5 rounded-xl border transition-all ${darkMode
+                                    ? 'bg-slate-800 border-slate-700 text-slate-400 hover:text-rose-400 hover:bg-slate-700'
+                                    : 'bg-white border-slate-200 text-slate-500 hover:text-rose-600 hover:bg-slate-100'}`}
                                 title="退出登录"
                             >
-                                <LogOut size={20} />
+                                <LogOut size={18} />
                             </button>
                         </div>
                     </div>
@@ -481,6 +484,19 @@ const App = () => {
                     <GmailInboxView darkMode={darkMode} />
                 ) : view === 'dashboard' ? (
                     <DashboardView darkMode={darkMode} />
+                ) : view === 'security' ? (
+                    <SecurityCenterView darkMode={darkMode} showNotification={showNotification} />
+                ) : view === 'recharge' ? (
+                    <RechargeView
+                        accounts={accounts.map(acc => ({
+                            id: acc.id,
+                            email: acc.email,
+                            remark: acc.remark,
+                            status: acc.status
+                        }))}
+                        darkMode={darkMode}
+                        showNotification={showNotification}
+                    />
                 ) : (
                     <GooglemailView
                         accounts={accounts}
@@ -492,11 +508,14 @@ const App = () => {
 
             {/* Notification Toast */}
             {notification && (
-                <div className={`fixed bottom-8 right-8 flex items-center gap-3 px-6 py-4 rounded-2xl shadow-2xl transition-all
-            animate-bounce z-[100] ${notification.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
-                    }`}>
-                    <CheckCircle2 size={20} />
-                    <span className="font-medium">{notification.msg}</span>
+                <div className={`fixed bottom-8 right-8 flex items-center gap-3 px-5 py-3.5 rounded-2xl shadow-xl transition-all
+            animate-in slide-in-from-bottom-4 fade-in duration-300 z-[100] backdrop-blur-md border ${
+                notification.type === 'success'
+                    ? 'bg-emerald-600/95 text-white border-emerald-500/30 shadow-emerald-950/20'
+                    : 'bg-red-600/95 text-white border-red-500/30 shadow-red-950/20'
+            }`}>
+                    <CheckCircle2 size={19} />
+                    <span className="font-medium text-sm tracking-wide">{notification.msg}</span>
                 </div>
             )}
 

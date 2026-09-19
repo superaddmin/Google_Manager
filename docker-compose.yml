@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  google-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: google-manager:latest
+    container_name: google-manager
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8002:8002"
+    environment:
+      # 生产环境模式
+      - FLASK_ENV=production
+      # 管理员面板登录密码（必填，禁止使用默认占位值）
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD 必须在 .env 中显式指定强密码}
+      # Flask 会话加密密钥（生产环境至少 32 字符，禁止使用示例值）
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY 必须在 .env 中显式配置至少 32 字符密钥}
+      # Gmail OAuth 凭证 Fernet 加密密钥（必填，使用 cryptography.fernet.Fernet.generate_key() 生成）
+      - GMAIL_TOKEN_ENCRYPTION_KEY=${GMAIL_TOKEN_ENCRYPTION_KEY:?GMAIL_TOKEN_ENCRYPTION_KEY 必须在 .env 中显式配置}
+      # 充值功能模式（disabled: 禁用, mock: 模拟演示, live: 官方生产履约）
+      - RECHARGE_MODE=${RECHARGE_MODE:-disabled}
+      # 充值上游服务 API 地址
+      - RECHARGE_UPSTREAM_URL=${RECHARGE_UPSTREAM_URL:-https://aichong666.com/api}
+      # Google API 客户端凭据文件容器内路径
+      - GMAIL_CLIENT_SECRET_FILE=/app/credentials.json
+      # 可选公网反向代理回调链接（如配置域名，例如 https://gmail.yourdomain.com/api/gmail/oauth/callback）
+      - GMAIL_REDIRECT_URI=${GMAIL_REDIRECT_URI:-}
+      # 住宅代理服务（必填，部署在海外机房 VPS 上时防 Google 机器人拦截）
+      # 例如: http://username:password@proxy.example.com:8080
+      - PROXY=${PROXY:-}
+      # Playwright 模式
+      - HEADLESS=true
+    volumes:
+      # 持久化 SQLite 数据库文件
+      - ./instance:/app/instance
+      # 持久化自动化任务日志与截图
+      - ./googlemail/output:/app/googlemail/output
+      # 持久化任务运行临时缓存
+      - ./googlemail/runtime:/app/googlemail/runtime
+      # 挂载 Google 客户端密钥配置
+      - ./credentials.json:/app/credentials.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8002/api/auth/check || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"

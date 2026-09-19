@@ -81,10 +81,14 @@ const LoginPage = ({ onLoginSuccess, darkMode }) => {
 
                 {/* 封禁提示 */}
                 {banned ? (
-                    <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center">
+                    <div className={`rounded-2xl p-6 text-center border ${
+                        darkMode
+                            ? 'bg-red-950/40 border-red-800/60 text-red-300'
+                            : 'bg-red-50 border-red-200 text-red-600'
+                    }`}>
                         <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
-                        <h2 className="text-lg font-bold text-red-600 mb-2">访问被拒绝</h2>
-                        <p className="text-red-500 text-sm">{banMessage}</p>
+                        <h2 className={`text-lg font-bold mb-2 ${darkMode ? 'text-red-300' : 'text-red-600'}`}>访问被拒绝</h2>
+                        <p className={`text-sm ${darkMode ? 'text-red-400' : 'text-red-500'}`}>{banMessage}</p>
                     </div>
                 ) : (
                     <form onSubmit={handleSubmit} className="space-y-6">
@@ -117,7 +121,11 @@ const LoginPage = ({ onLoginSuccess, darkMode }) => {
 
                         {/* 错误提示 */}
                         {error && (
-                            <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-xl text-red-600 text-sm">
+                            <div className={`flex items-center gap-2 p-3 rounded-xl border text-sm ${
+                                darkMode
+                                    ? 'bg-red-950/40 border-red-800/60 text-red-300'
+                                    : 'bg-red-50 border-red-200 text-red-600'
+                            }`}>
                                 <AlertTriangle size={16} />
                                 <span>{error}</span>
                             </div>
@@ -129,7 +137,7 @@ const LoginPage = ({ onLoginSuccess, darkMode }) => {
                             disabled={loading}
                             className={`w-full py-4 rounded-xl font-bold text-white transition-all ${loading
                                 ? 'bg-slate-400 cursor-not-allowed'
-                                : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-200'}`}
+                                : `bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-lg ${darkMode ? 'shadow-indigo-950/50' : 'shadow-blue-200'}`}`}
                         >
                             {loading ? (
                                 <span className="flex items-center justify-center gap-2">

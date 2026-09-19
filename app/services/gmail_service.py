@@ -2,6 +2,7 @@
 import base64
 import json
 import os
+import time
 from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -10,8 +11,36 @@ from flask import current_app, url_for
 from app import db
 from app.models.gmail_connection import GmailConnection
 from app.models.gmail_watch import GmailWatch
+from app.models.one_time_token import OneTimeToken
 
 GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+
+
+class OAuthStateManager:
+    """服务端 OAuth 状态注册与生命周期管理，解决无头浏览器/后台任务无 Session 隔离的问题。"""
+    TTL_SECONDS = 1800  # 30 分钟
+
+    @classmethod
+    def register(cls, state: str, account_id: int | None = None, metadata: dict | None = None) -> str:
+        OneTimeToken.register('gmail_oauth', state, {
+            'account_id': account_id,
+            'metadata': metadata or {},
+            'created_at': time.time(),
+        }, cls.TTL_SECONDS)
+        return state
+
+    @classmethod
+    def validate(cls, state: str) -> bool:
+        record = OneTimeToken.lookup('gmail_oauth', state)
+        return bool(record and record.consumed_at is None and record.expires_at > time.time())
+
+    @classmethod
+    def consume(cls, state: str) -> dict | None:
+        return OneTimeToken.consume('gmail_oauth', state)
+
+    @classmethod
+    def clear(cls):
+        OneTimeToken.clear('gmail_oauth')
 
 
 class GmailServiceError(RuntimeError):
@@ -52,15 +81,20 @@ class GmailService:
     def _flow(cls, state=None):
         from google_auth_oauthlib.flow import Flow
         flow = Flow.from_client_config(cls._client_config(), scopes=GMAIL_SCOPES, state=state)
-        flow.redirect_uri = url_for('api.gmail_oauth_callback', _external=True)
+        custom_redirect = current_app.config.get('GMAIL_REDIRECT_URI')
+        if custom_redirect:
+            flow.redirect_uri = custom_redirect
+        else:
+            flow.redirect_uri = url_for('api.gmail_oauth_callback', _external=True)
         return flow
 
     @classmethod
-    def authorization_url(cls):
+    def authorization_url(cls, account_id=None, metadata=None):
         flow = cls._flow()
         authorization_url, state = flow.authorization_url(
             access_type='offline', include_granted_scopes='true', prompt='consent'
         )
+        OAuthStateManager.register(state, account_id=account_id, metadata=metadata)
         return authorization_url, state
 
     @classmethod

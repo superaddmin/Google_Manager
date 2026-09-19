@@ -40,6 +40,10 @@ class AccountHistory(db.Model):
         names = {
             'password': '密码',
             'secret': '2FA密钥',
-            'recovery': '恢复邮箱'
+            'recovery': '恢复邮箱',
+            'status': '状态',
+            'sold_status': '出售状态',
+            'security_action': '安全应急处置',
+            'gmail_oauth': 'Gmail授权'
         }
         return names.get(field_name, field_name)

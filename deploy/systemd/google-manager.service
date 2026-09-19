@@ -1,0 +1,36 @@
+[Unit]
+Description=Google Manager Production Web & Automation Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 建议以非 root 专用用户运行，如 www-data 或专门创建的 googlemanager
+User=root
+Group=root
+
+# 工程根目录
+WorkingDirectory=/opt/google-manager
+
+# 注入环境变量配置文件
+EnvironmentFile=-/opt/google-manager/.env
+
+# 确保 Playwright 能够定位到已安装的浏览器与无头模式
+Environment=HEADLESS=true
+Environment=FLASK_ENV=production
+Environment=PYTHONUNBUFFERED=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# 启动命令：使用虚拟环境中的 gunicorn 加载配置
+ExecStart=/opt/google-manager/.venv/bin/gunicorn -c deploy/gunicorn.conf.py run:app
+
+# 进程异常自动重启
+Restart=always
+RestartSec=5s
+
+# 资源限制防泄漏
+LimitNOFILE=65535
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

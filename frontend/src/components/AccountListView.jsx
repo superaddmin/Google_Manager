@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
     Search,
     Mail,
@@ -52,6 +52,11 @@ const AccountListView = ({
     const [selectedIds, setSelectedIds] = useState([]);
     const [exportFormat, setExportFormat] = useState('csv');
     const [exporting, setExporting] = useState(false);
+
+    // 当筛选或搜索变化时重置密码显隐状态，避免密码泄露残留
+    useEffect(() => {
+        setVisiblePasswords(new Set());
+    }, [soldFilter, search]);
 
     // 根据筛选过滤账号
     const filteredAccounts = useMemo(() => {
@@ -346,9 +351,9 @@ const AccountListView = ({
                                         </td>
                                     </tr>
                                 ) : pagination.paginatedData.length > 0 ? pagination.paginatedData.map((acc, index) => (
-                                    <tr key={acc.id} className={`transition-colors group ${darkMode
-                                        ? (index % 2 === 0 ? 'bg-slate-800/80' : 'bg-slate-900/60') + ' hover:bg-slate-700/70'
-                                        : (index % 2 === 0 ? 'bg-white' : 'bg-blue-50/60') + ' hover:bg-blue-100/70'}`}>
+                                    <tr key={acc.id} className={`transition-colors group border-b ${darkMode
+                                        ? 'border-slate-700/60 hover:bg-slate-700/40'
+                                        : 'border-slate-100 hover:bg-slate-50/80'}`}>
                                         {/* 勾选 */}
                                         <td className="px-3 py-4 text-center">
                                             <input
@@ -361,8 +366,8 @@ const AccountListView = ({
                                         </td>
                                         {/* 序号 - 显示全局序号 */}
                                         <td className="px-4 py-4 text-center">
-                                            <span className={`inline-flex items-center justify-center w-7 h-7 text-sm font-bold rounded-lg ${darkMode
-                                                ? 'bg-slate-700 text-slate-300'
+                                            <span className={`inline-flex items-center justify-center w-7 h-7 text-xs font-semibold rounded-lg ${darkMode
+                                                ? 'bg-slate-700/70 text-slate-300'
                                                 : 'bg-slate-100 text-slate-600'}`}>
                                                 {(pagination.currentPage - 1) * pagination.pageSize + index + 1}
                                             </span>
@@ -370,15 +375,15 @@ const AccountListView = ({
                                         {/* 谷歌账号 */}
                                         <td className="px-4 py-4 max-w-[280px]">
                                             <div className="flex items-center gap-2">
-                                                <span className={`font-bold flex items-center gap-2 ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>
-                                                    <Mail size={16} className={darkMode ? 'text-blue-400 flex-shrink-0' : 'text-blue-500 flex-shrink-0'} />
-                                                    <span className="truncate" title={acc.email}>{acc.email}</span>
+                                                <span className={`font-semibold text-sm flex items-center gap-2 ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>
+                                                    <Mail size={15} className={darkMode ? 'text-blue-400 flex-shrink-0' : 'text-blue-500 flex-shrink-0'} />
+                                                    <span className="truncate font-sans" title={acc.email}>{acc.email}</span>
                                                 </span>
                                                 <button
                                                     onClick={() => openHistoryDrawer(acc)}
                                                     className={`p-1 rounded-md transition-all flex-shrink-0 ${darkMode
                                                         ? 'text-slate-500 hover:text-purple-400 hover:bg-slate-700'
-                                                        : 'text-slate-300 hover:text-purple-500 hover:bg-purple-50'}`}
+                                                        : 'text-slate-400 hover:text-purple-600 hover:bg-purple-50'}`}
                                                     title="查看修改历史"
                                                 >
                                                     <History size={14} />
@@ -388,12 +393,19 @@ const AccountListView = ({
                                         {/* 登录密码 */}
                                         <td className="px-4 py-4 max-w-[220px]">
                                             {(() => {
+                                                if (acc.status === 'locked') {
+                                                    return (
+                                                        <span className="inline-flex items-center gap-1 font-mono text-xs text-purple-500 dark:text-purple-400 font-semibold" title="账号处于应急锁定保护状态，凭证已屏蔽">
+                                                            •••••••• [已锁定]
+                                                        </span>
+                                                    );
+                                                }
                                                 const passwordVisible = visiblePasswords.has(acc.id);
                                                 const password = acc.password || '';
                                                 return (
                                                     <div className="flex items-center gap-2 min-w-0">
                                                         <span
-                                                            className={`font-mono text-sm truncate flex-1 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}
+                                                            className={`font-mono text-xs truncate flex-1 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}
                                                             title={passwordVisible ? (password || '未设置') : '密码已隐藏'}
                                                         >
                                                             {passwordVisible ? (password || '未设置') : '••••••••'}
@@ -416,35 +428,52 @@ const AccountListView = ({
                                         </td>
                                         {/* 状态 */}
                                         <td className="px-4 py-4 text-center">
-                                            <button onClick={() => toggleStatus(acc.id)}
-                                                className={`px-2 py-1 rounded-full text-xs font-black transition-all duration-300 transform active:scale-95 whitespace-nowrap ${acc.status === 'pro' ? 'bg-green-500/10 text-green-500 border border-green-500/20 shadow-[0_0_12px_rgba(34,197,94,0.2)]' : 'bg-slate-100 text-slate-400 border border-slate-200 hover:bg-slate-200'}`}
+                                            <button onClick={() => acc.status !== 'locked' && toggleStatus(acc.id)}
+                                                disabled={acc.status === 'locked'}
+                                                title={acc.status === 'locked' ? '账号已锁定，需在安全中心解锁' : '点击切换状态'}
+                                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all duration-200 transform active:scale-95 whitespace-nowrap ${
+                                                    acc.status === 'pro'
+                                                        ? (darkMode ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : 'bg-emerald-50 text-emerald-600 border border-emerald-200')
+                                                        : acc.status === 'locked'
+                                                        ? (darkMode ? 'bg-purple-500/15 text-purple-400 border border-purple-500/30' : 'bg-purple-50 text-purple-600 border border-purple-200')
+                                                        : (darkMode ? 'bg-slate-700/60 text-slate-400 border border-slate-600 hover:bg-slate-700' : 'bg-slate-100 text-slate-500 border border-slate-200 hover:bg-slate-200')
+                                                }`}
                                             >
-                                                {acc.status === 'pro' ? 'Pro' : '未开启'}
+                                                <span className={`w-1.5 h-1.5 rounded-full ${
+                                                    acc.status === 'pro' ? 'bg-emerald-500' : acc.status === 'locked' ? 'bg-purple-500' : 'bg-slate-400'
+                                                }`} />
+                                                {acc.status === 'pro' ? 'Pro' : acc.status === 'locked' ? '已锁定' : '未开启'}
                                             </button>
                                         </td>
                                         {/* 恢复邮箱 */}
                                         <td className="px-4 py-4 max-w-[280px]">
-                                            <span className={`text-sm font-medium truncate block ${darkMode ? 'text-slate-300' : 'text-slate-600'}`} title={acc.recovery}>{acc.recovery}</span>
+                                            <span className={`text-sm font-normal truncate block ${darkMode ? 'text-slate-300' : 'text-slate-600'}`} title={acc.recovery}>{acc.recovery}</span>
                                         </td>
                                         {/* 2FA 验证 - 点击复制 */}
                                         <td className="px-4 py-4">
                                             <div className="w-[100px] h-10 flex flex-col justify-center">
-                                                {twoFACode.id === acc.id ? (
+                                                {acc.status === 'locked' ? (
+                                                    <span className="text-xs text-purple-400 italic">已锁定保护</span>
+                                                ) : twoFACode.id === acc.id ? (
                                                     <div className="flex flex-col gap-1 w-full animate-in zoom-in-95">
                                                         <div
                                                             onClick={() => copyToClipboard(twoFACode.code, '2FA验证码')}
-                                                            className="flex items-center justify-between bg-blue-50 text-blue-700 px-2 py-1 rounded-lg border border-blue-100 cursor-pointer hover:bg-blue-100 transition-all"
+                                                            className={`flex items-center justify-between px-2.5 py-1 rounded-lg border cursor-pointer transition-all ${
+                                                                darkMode
+                                                                    ? 'bg-blue-950/60 text-blue-300 border-blue-800/60 hover:bg-blue-900/60'
+                                                                    : 'bg-blue-50 text-blue-700 border-blue-100 hover:bg-blue-100'
+                                                            }`}
                                                             title="点击复制2FA验证码">
-                                                            <span className="font-bold tracking-widest text-base">{twoFACode.code}</span>
-                                                            <span className="text-[10px] font-bold tabular-nums opacity-60">{twoFACode.expiry}s</span>
+                                                            <span className="font-bold tracking-widest text-sm font-mono">{twoFACode.code}</span>
+                                                            <span className="text-[10px] font-bold tabular-nums opacity-70">{twoFACode.expiry}s</span>
                                                         </div>
-                                                        <div className="h-1 bg-blue-100 rounded-full overflow-hidden">
+                                                        <div className={`h-1 rounded-full overflow-hidden ${darkMode ? 'bg-slate-700' : 'bg-blue-100'}`}>
                                                             <div className="h-full bg-blue-500 transition-all duration-1000 ease-linear"
                                                                 style={{ width: `${(twoFACode.expiry / 30) * 100}%` }}></div>
                                                         </div>
                                                     </div>
                                                 ) : (
-                                                    <span className="text-slate-300 text-sm italic">未获取</span>
+                                                    <span className={`text-xs italic ${darkMode ? 'text-slate-500' : 'text-slate-300'}`}>未获取</span>
                                                 )}
                                             </div>
                                         </td>
@@ -455,12 +484,12 @@ const AccountListView = ({
                                                     <ActionButton icon={<Mail size={14} />} label="账号" color="blue" darkMode={darkMode} onClick={() =>
                                                         copyToClipboard(acc.email, '邮箱')} />
                                                     <ActionButton icon={<Key size={14} />} label="密码" color="green" darkMode={darkMode} onClick={() =>
-                                                        copyToClipboard(acc.password, '密码')} />
+                                                        acc.status === 'locked' ? showNotification?.('账号已锁定，禁止导出密码', 'error') : copyToClipboard(acc.password, '密码')} />
                                                     <ActionButton icon={<ExternalLink size={14} />} label="恢复" color="orange" darkMode={darkMode} onClick={() =>
                                                         copyToClipboard(acc.recovery, '恢复邮箱')} />
                                                 </div>
 
-                                                <button onClick={() => generate2FA(acc.id, acc.secret)}
+                                                <button onClick={() => acc.status === 'locked' ? showNotification?.('账号已锁定，禁止读取2FA', 'error') : generate2FA(acc.id, acc.secret)}
                                                     className={`p-1.5 rounded-lg transition-all shadow-sm ${darkMode
                                                         ? 'bg-blue-900/50 text-blue-300 hover:bg-blue-500 hover:text-white border border-blue-700/50'
                                                         : 'bg-blue-50 text-blue-600 hover:bg-blue-600 hover:text-white'}`}
@@ -484,7 +513,7 @@ const AccountListView = ({
 
                                                 <div className={`h-5 w-[1px] ${darkMode ? 'bg-slate-600' : 'bg-slate-200'}`}></div>
 
-                                                <button onClick={() => copyAllInfo(acc)}
+                                                <button onClick={() => acc.status === 'locked' ? showNotification?.('账号已锁定，禁止导出敏感信息', 'error') : copyAllInfo(acc)}
                                                     className="flex items-center gap-1 px-2 py-1.5 bg-gradient-to-r from-purple-500 to-indigo-500 text-white text-[10px] font-bold rounded-lg hover:from-purple-600 hover:to-indigo-600 transition-all shadow-sm"
                                                     title="复制全部信息">
                                                     <Copy size={12} />
@@ -495,10 +524,15 @@ const AccountListView = ({
                                         {/* 出售状态 */}
                                         <td className="px-4 py-4 text-center">
                                             <button onClick={() => toggleSoldStatus(acc.id, acc.soldStatus)}
-                                                className={`px-2 py-1 rounded-full text-xs font-black transition-all duration-300 transform active:scale-95 whitespace-nowrap ${acc.soldStatus === 'sold'
-                                                    ? 'bg-red-500/10 text-red-500 border border-red-500/20 shadow-[0_0_12px_rgba(239,68,68,0.2)]'
-                                                    : 'bg-green-500/10 text-green-500 border border-green-500/20 shadow-[0_0_12px_rgba(34,197,94,0.2)]'}`}
+                                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all duration-200 transform active:scale-95 whitespace-nowrap ${
+                                                    acc.soldStatus === 'sold'
+                                                        ? (darkMode ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30' : 'bg-rose-50 text-rose-600 border border-rose-200')
+                                                        : (darkMode ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : 'bg-emerald-50 text-emerald-600 border border-emerald-200')
+                                                }`}
                                             >
+                                                <span className={`w-1.5 h-1.5 rounded-full ${
+                                                    acc.soldStatus === 'sold' ? 'bg-rose-500' : 'bg-emerald-500'
+                                                }`} />
                                                 {acc.soldStatus === 'sold' ? '已售出' : '未售出'}
                                             </button>
                                         </td>

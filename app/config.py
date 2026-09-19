@@ -23,6 +23,9 @@ class Config:
     GMAIL_TOKEN_ENCRYPTION_KEY = os.environ.get('GMAIL_TOKEN_ENCRYPTION_KEY')
     GMAIL_PUBSUB_TOPIC = os.environ.get('GMAIL_PUBSUB_TOPIC')
     GMAIL_PUBSUB_VERIFICATION_TOKEN = os.environ.get('GMAIL_PUBSUB_VERIFICATION_TOKEN')
+    GMAIL_REDIRECT_URI = os.environ.get('GMAIL_REDIRECT_URI')
+    RECHARGE_MODE = os.environ.get('RECHARGE_MODE', 'disabled').lower()
+    RECHARGE_UPSTREAM_URL = os.environ.get('RECHARGE_UPSTREAM_URL', 'https://aichong666.com/api')
     
     # 数据库配置
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
@@ -32,6 +35,7 @@ class Config:
 class DevelopmentConfig(Config):
     """开发环境配置"""
     DEBUG = True
+    RECHARGE_MODE = os.environ.get('RECHARGE_MODE', 'disabled').lower()
 
 
 class ProductionConfig(Config):
@@ -47,6 +51,7 @@ class TestingConfig(Config):
     ADMIN_PASSWORD = 'admin123'
     GOOGLEMAIL_EXECUTION_ENABLED = False
     SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+    RECHARGE_MODE = 'mock'
 
 
 # 配置映射

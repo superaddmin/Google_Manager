@@ -24,8 +24,11 @@ from app.models.account_history import AccountHistory
 from app.models.googlemail_task import GooglemailTask
 from app.models.gmail_connection import GmailConnection
 from app.models.gmail_rule import GmailRule
-from app.services.gmail_service import GmailService, GmailServiceError
+from app.services.gmail_service import GmailService, GmailServiceError, OAuthStateManager
 from app.services.gmail_rule_service import GmailRuleService, GmailRuleServiceError
+from app.services.security_service import SecurityService
+from app.services.batch_oauth_service import batch_oauth_manager, BatchOAuthError
+from app.services.email_poller import gmail_sync_daemon
 
 api_bp = Blueprint('api', __name__)
 
@@ -43,15 +46,19 @@ def gmail_oauth_start():
 
 @api_bp.route('/gmail/oauth/callback', methods=['GET'])
 def gmail_oauth_callback():
-    state = session.pop('gmail_oauth_state', None)
-    if not state or state != request.args.get('state'):
+    state_param = request.args.get('state')
+    session_state = session.pop('gmail_oauth_state', None)
+
+    if session_state and session_state != state_param:
+        return error_response('Gmail OAuth 状态无效，请重新授权', 400)
+    if not OAuthStateManager.consume(state_param):
         return error_response('Gmail OAuth 状态无效，请重新授权', 400)
     if request.args.get('error'):
         return error_response('用户取消了 Gmail 授权', 400)
     if not request.args.get('code'):
         return error_response('Gmail OAuth 缺少授权码', 400)
     try:
-        connection = GmailService.complete_authorization(request.args.get('code'), state)
+        connection = GmailService.complete_authorization(request.args.get('code'), state_param)
         return success_response(connection.to_dict(), 'Gmail 授权成功，请返回管理页面')
     except Exception as error:
         return server_error_response('Gmail 授权失败，请稍后重试', error)
@@ -394,7 +401,7 @@ def server_error_response(message, error):
 @api_bp.before_request
 def require_authentication():
     """账号接口必须通过管理员登录会话访问。"""
-    public_endpoints = {'api.login', 'api.logout', 'api.check_auth', 'api.gmail_pubsub_webhook'}
+    public_endpoints = {'api.login', 'api.logout', 'api.check_auth', 'api.gmail_pubsub_webhook', 'api.gmail_oauth_callback'}
     if request.endpoint not in public_endpoints and not session.get('authenticated'):
         return error_response('请先登录', 401)
 
@@ -444,9 +451,18 @@ def export_accounts():
         search, sold_status=sold if sold in ('sold', 'unsold') else None
     )
 
+    # 应急锁定账号脱敏：防止导出敏感密码与 2FA 密钥
+    export_accounts_data = []
+    for acc in accounts:
+        item = dict(acc)
+        if item.get('status') == 'locked':
+            item['password'] = '******'
+            item['secret'] = '******'
+        export_accounts_data.append(item)
+
     if export_format == 'json':
         payload = io.BytesIO(
-            json.dumps(accounts, ensure_ascii=False, indent=2).encode('utf-8')
+            json.dumps(export_accounts_data, ensure_ascii=False, indent=2).encode('utf-8')
         )
         mimetype = 'application/json'
     elif export_format == 'txt':
@@ -458,7 +474,7 @@ def export_accounts():
                 account['recovery'],
                 account['secret'],
             ])
-            for account in accounts
+            for account in export_accounts_data
         ]
         payload = io.BytesIO(('\n'.join(lines) + '\n').encode('utf-8'))
         mimetype = 'text/plain'
@@ -466,7 +482,7 @@ def export_accounts():
         buffer = io.StringIO()
         writer = csv.writer(buffer)
         writer.writerow(EXPORT_CSV_HEADERS)
-        for account in accounts:
+        for account in export_accounts_data:
             writer.writerow([
                 account['email'],
                 account['password'],
@@ -707,6 +723,8 @@ def toggle_status(account_id):
         if account is None:
             return error_response('账号不存在', 404)
         return success_response(data=account, message='状态已更新')
+    except ValueError as e:
+        return error_response(str(e), 400)
     except Exception as e:
         return server_error_response('状态更新失败，请稍后重试', e)
 
@@ -747,6 +765,8 @@ def get_2fa_code(account_id):
         if result is None:
             return error_response('账号不存在或未配置 2FA 密钥', 404)
         return success_response(data=result)
+    except ValueError as e:
+        return error_response(str(e), 403)
     except Exception as e:
         return server_error_response('获取验证码失败，请稍后重试', e)
 
@@ -945,3 +965,167 @@ def check_auth():
         'banned': False,
         'authenticated': bool(session.get('authenticated'))
     })
+
+
+# ==================== 集中邮箱安全与防盗 API ====================
+
+@api_bp.route('/security/overview', methods=['GET'])
+def get_security_overview():
+    """获取集中邮箱安全与防盗态势总览"""
+    try:
+        data = SecurityService.get_security_overview()
+        return success_response(data=data)
+    except Exception as e:
+        return server_error_response('获取安全态势失败，请稍后重试', e)
+
+
+@api_bp.route('/security/accounts', methods=['GET'])
+def get_security_accounts():
+    """获取带安全评级与风险维度的账号列表"""
+    try:
+        filter_level = request.args.get('filter', 'all')
+        data = SecurityService.get_security_accounts(filter_level)
+        return success_response(data=data)
+    except Exception as e:
+        return server_error_response('获取安全账号列表失败，请稍后重试', e)
+
+
+@api_bp.route('/security/forwarding-audit', methods=['GET'])
+def get_forwarding_audit():
+    """扫描所有已授权 Gmail 账号的隐蔽外部转发和过滤规则"""
+    try:
+        data = SecurityService.audit_all_forwarding_rules()
+        return success_response(data=data)
+    except Exception as e:
+        return server_error_response('扫描转发规则失败，请稍后重试', e)
+
+
+@api_bp.route('/security/central-otps', methods=['GET'])
+def get_central_otps():
+    """跨所有已连接邮箱集中获取最新验证码与安全告警"""
+    try:
+        limit = request.args.get('limit', 10, type=int)
+        limit = max(1, min(limit or 10, 50))
+        data = SecurityService.get_central_otps_and_alerts(limit_per_mailbox=limit)
+        return success_response(data=data)
+    except Exception as e:
+        return server_error_response('集中获取验证码失败，请稍后重试', e)
+
+
+@api_bp.route('/security/accounts/<int:account_id>/lock', methods=['POST'])
+def lock_account(account_id):
+    """一键应急锁号，阻断导出并标记防盗保护"""
+    try:
+        payload = request.get_json(silent=True) or {}
+        reason = payload.get('reason', '管理员手动触发应急锁定')
+        account = SecurityService.lock_account(account_id, reason)
+        risk_info = SecurityService.calculate_account_risk(account)
+        return success_response(data=risk_info, message=f'账号 {account.email} 已被应急锁定保护')
+    except ValueError as e:
+        return error_response(str(e), 404)
+    except Exception as e:
+        return server_error_response('应急锁定失败，请稍后重试', e)
+
+
+@api_bp.route('/security/accounts/<int:account_id>/unlock', methods=['POST'])
+def unlock_account(account_id):
+    """解除账号的应急锁定状态"""
+    try:
+        account = SecurityService.unlock_account(account_id)
+        risk_info = SecurityService.calculate_account_risk(account)
+        return success_response(data=risk_info, message=f'账号 {account.email} 已解除锁定')
+    except ValueError as e:
+        return error_response(str(e), 404)
+    except Exception as e:
+        return server_error_response('解除锁定失败，请稍后重试', e)
+
+
+# ---------------------------------------------------------------------------
+# 批量 Google OAuth 2.0 自动授权接口
+# ---------------------------------------------------------------------------
+
+@api_bp.route('/gmail/batch-authorize', methods=['POST'])
+def gmail_batch_authorize():
+    """启动所选账号的批量 OAuth 2.0 自动授权任务"""
+    data = request.get_json(silent=True) or {}
+    account_ids = data.get('accountIds') or []
+    options = data.get('options') or {}
+    if not account_ids or not isinstance(account_ids, list):
+        return error_response('请至少提供一个待授权的账号 ID 列表')
+    try:
+        record = batch_oauth_manager.start_batch(
+            current_app._get_current_object(),
+            account_ids,
+            options=options,
+        )
+        return success_response(data=record.to_dict(), message='批量 OAuth 自动授权任务已启动'), 201
+    except BatchOAuthError as error:
+        return error_response(str(error), 400)
+    except Exception as error:
+        return server_error_response('启动批量授权失败，请稍后重试', error)
+
+
+@api_bp.route('/gmail/batch-authorize/status', methods=['GET'])
+def gmail_batch_authorize_status():
+    """获取当前或最新的批量授权任务进度与日志"""
+    active = batch_oauth_manager.active_task()
+    latest = batch_oauth_manager.latest_task()
+    return success_response(data={
+        'active': active.to_dict() if active else None,
+        'latest': latest.to_dict() if latest else None,
+    })
+
+
+@api_bp.route('/gmail/batch-authorize/cancel', methods=['POST'])
+def gmail_batch_authorize_cancel():
+    """取消进行中的批量授权任务"""
+    data = request.get_json(silent=True) or {}
+    task_id = data.get('taskId')
+    if not task_id:
+        active = batch_oauth_manager.active_task()
+        if not active:
+            return error_response('当前没有正在运行的批量授权任务')
+        task_id = active.task_id
+    record = batch_oauth_manager.cancel_task(task_id)
+    if not record:
+        return error_response('任务不存在', 404)
+    return success_response(data=record.to_dict(), message='批量授权任务已请求取消')
+
+
+# ---------------------------------------------------------------------------
+# Gmail 挂机收信守护进程 (GmailSyncDaemon) 接口
+# ---------------------------------------------------------------------------
+
+@api_bp.route('/gmail/daemon/status', methods=['GET'])
+def gmail_daemon_status():
+    """获取后台挂机收信守护进程的运行状态与指标"""
+    return success_response(data=gmail_sync_daemon.status())
+
+
+@api_bp.route('/gmail/daemon/start', methods=['POST'])
+def gmail_daemon_start():
+    """启动后台挂机收信守护进程"""
+    data = request.get_json(silent=True) or {}
+    interval = data.get('intervalSeconds', 180)
+    status = gmail_sync_daemon.start(
+        current_app._get_current_object(),
+        interval_seconds=interval,
+    )
+    return success_response(data=status, message='挂机收信守护进程已启动')
+
+
+@api_bp.route('/gmail/daemon/stop', methods=['POST'])
+def gmail_daemon_stop():
+    """停止后台挂机收信守护进程"""
+    status = gmail_sync_daemon.stop()
+    return success_response(data=status, message='挂机收信守护进程已停止')
+
+
+@api_bp.route('/gmail/daemon/sync-now', methods=['POST'])
+def gmail_daemon_sync_now():
+    """立即触发一次全量邮箱同步与安全扫描"""
+    try:
+        result = gmail_sync_daemon.sync_once(current_app._get_current_object())
+        return success_response(data=result, message='全量邮箱同步完成')
+    except Exception as error:
+        return server_error_response('全量邮箱同步失败，请稍后重试', error)

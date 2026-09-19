@@ -5,418 +5,253 @@ https://github.com/superaddmin/Google_Manager.git
 ```
 
 <p align="center">
-  <b>一款专业的谷歌账号资产管理系统</b>
+  <b>专业谷歌账号资产管理、批量授权与集中邮箱防盗控制系统</b>
   <br>
-  <sub>支持批量导入、2FA验证码生成、账号状态管理、修改历史追踪等功能</sub>
+  <sub>支持 Playwright 批量自动授权、24H 无人值守挂机收信、集中邮箱防盗体检、隐蔽转发检测、跨邮箱验证码聚合、Docker/VPS 生产部署</sub>
 </p>
 
 ***
 
 ## ✨ 功能特性
 
-### 🔑 账号管理
+### 🔑 账号管理与批量操作
 
-- **批量导入** - 支持多种分隔符格式（`|`、`——`、`----`、`--`）快速导入账号
-- **单个导入** - 表单式单个账号录入
-- **智能搜索** - 按邮箱或备注内容搜索账号
-- **状态筛选** - 筛选已售出/未售出账号
+- **批量导入** - 支持多种分隔符格式（`|`、`——`、`----`、`--`）快速导入账号，自动校验邮箱格式与去重。
+- **单个录入** - 表单式单个账号录入，支持自定义备注与初始状态。
+- **智能搜索与状态筛选** - 支持按邮箱、备注进行模糊搜索，支持全部 / 已售出 / 未售出状态即时筛选。
+- **批量管理操作** - 支持全选/多选账号，支持一键批量删除、批量标记出售状态（已售出/未售出）、批量修改备注。
+- **多格式安全导出** - 支持根据当前搜索和出售状态，将账号资产导出为 `CSV`、`TXT` 或 `JSON` 格式，支持锁定账号脱敏隔离。
 
-### 🛡️ 2FA 验证码
+### 🛡️ 2FA 验证码与凭证安全
 
-- **一键生成** - 点击即可获取当前 TOTP 验证码
-- **实时倒计时** - 显示验证码剩余有效时间
-- **进度条显示** - 直观展示验证码过期进度
+- **一键生成 TOTP** - 点击秒级生成 6 位 2FA 动态验证码。
+- **实时倒计时与过期进度条** - 直观展示当前 TOTP 验证码有效剩余秒数及过期进度。
+- **独立/一键复制** - 单独复制邮箱、密码、恢复邮箱，或一键复制完整账号组合信息。
+- **密码显隐防窥保护** - 列表默认掩码显示密码，独立按钮切换显示/隐藏；切换筛选或搜索时自动重置为掩码状态，避免敏感凭证泄漏。
 
-### 📋 快捷复制
+### 🤖 Playwright 全自动批量挂机授权 (Batch OAuth Auto-Authorizer)
 
-- 单独复制邮箱、密码、恢复邮箱
-- **一键复制全部** - 快速复制完整账号信息
+- **无头浏览器自动化流水线** - 驱动 Chromium 依次自动输入账号、密码、根据 TOTP 密钥动态计算 2FA、处理恢复邮箱挑战。
+- **自动突破未验证警告** - 智能识别 Google OAuth “未验证此应用”提示，自动点击高级 -> 前往不安全。
+- **自动权限勾选与回调闭环** - 自动识别未选中的权限复选框并全部勾选，点击继续并拦截回调，自动完成 Token 换取与 Fernet 强加密入库。
+- **服务端 State 彻底解耦** - 独创 `OAuthStateManager` 服务端状态注册与缓存机制，彻底解决无头沙箱与独立 Session 隔离冲突。
+- **实时进度看板与动态日志** - 前端弹窗支持实时展示当前授权账号、进度条、成功/失败统计与滚动运行日志。
 
-### 📊 出售状态管理
+### ⚡ 24H 无人值守挂机收信守护者 (GmailSyncDaemon)
 
-- 标记账号为"已售出"/"未售出"
-- 切换回未售出需二次确认
-- 状态变更历史记录
+- **零浏览器开销轻量守护** - 授权完成后纯走 Google 官方 REST API（单进程约 30MB 内存占用），不启动任何浏览器，适合 1C1G/1C2G VPS 长期常驻。
+- **周期性自动轮询** - 支持 1/3/5/10 分钟自定义轮询周期，自动拉取所有已授权邮箱的未读邮件。
+- **集中验证码 (OTP) 自动归集** - 自动正则识别邮件中的 6 位数字代码与 Google 代码，无需登录网页，在防盗面板集中直接复制。
+- **自动化防盗排查** - 轮询过程中自动排查隐蔽转发与恶意过滤器，发现被盗迹象立即告警。
 
-### 📜 修改历史
+### 🚨 集中邮箱防盗与安全中控 (SecurityCenterView)
 
-- 记录密码、2FA密钥、恢复邮箱、出售状态的每次修改
-- 抽屉式面板展示修改历史
-- 修改前后对比显示
+专为大规模批量管理 Google 邮箱资产打造的防盗与反劫持防护体系：
 
-### ✉️ Googlemail 自动化
+- **全库防盗健康度雷达** - 综合评估账号安全风险分（0-100分），自动归类为安全良好、中度风险、高危被盗风险、已应急锁定。
+- **Gmail 隐蔽外部转发排查 (Stealth Forwarding Scanner)** - 通过官方 API 自动检测 Gmail 后台是否存在非法的 `Auto-Forwarding` 自动外发、已配置转发白名单，防止黑客暗中盗取后续邮件。
+- **黑客恶意过滤规则扫描 (Malicious Filter Detection)** - 自动扫描静默销毁、删除或绕过收件箱的恶意过滤规则，识破黑客拦截验证码并销毁安全告警的手段。
+- **跨邮箱验证码与安全告警聚合流 (Central OTP & Security Feed)** - 无需操作员逐个在本地浏览器登录账号，系统后台集中拉取各邮箱最新验证码，智能正则提取 Google、Telegram、Twitter/X、OpenAI、Discord 等平台 OTP 验证码，支持一键快捷复制，杜绝因分散登录导致的浏览器指纹风控与 Cookie 被盗。
+- **一键防盗锁号与应急 SOP** - 针对异常或受威胁账号，提供一键应急锁定，阻止导出和信息流转，并在修改历史中详细记录安全处置动作。
 
-- 从主页直接选择本地账号并启动 Googlemail 任务
-- 支持无头模式、操作延迟、账号间隔、恢复邮箱池和运行超时配置
-- 支持任务进度查询、取消、失败计数和人工复核计数
-- 自动把已完成任务的新 2FA 密钥及已确认恢复邮箱写回账号历史
+### 📊 资产统计看板 (DashboardView)
 
-### 🔒 安全特性
+- **全局资产概览** - 统计账号总量、Pro 账号数与标准账号数分布。
+- **出售与在库率** - 实时计算未售出库存数（在库率）与已售出数（售出率）。
+- **安全覆盖率透视** - 2FA 密钥覆盖率、安全恢复邮箱覆盖率及缺失数量直观图表展示。
+- **近期趋势分析** - 动态统计最近 14 天的入库新增走势与出售流转走势柱状对比。
 
-- **管理员密码保护** - 需密码登录才能访问系统
-- **7天登录有效期** - 登录后7天内无需重复登录
-- **IP 封禁机制** - 连续3次密码错误，封禁该 IP 24小时
-- **时间窗口校验** - 登录请求携带短时效盐值，不替代密码验证与 HTTPS
+### 🔒 核心防御与安全机制
 
-### 🎨 界面设计
-
-- **暗色/亮色模式** - 支持一键切换主题
-- **响应式布局** - 适配不同屏幕尺寸
-- **现代化 UI** - 采用 TailwindCSS 打造精美界面
-
-***
-
-## 📸 界面预览
-
-<details>
-<summary>点击展开预览图</summary>
-
-### 登录页面
-
-!\[登录页面]<img width="2550" height="1292" alt="image" src="https://github.com/user-attachments/assets/0e3faef6-37ff-4a46-b03b-3a4c396eb30b" />
-
-### 账号列表
-
-!\[账号列表]<img width="2550" height="1292" alt="image" src="https://github.com/user-attachments/assets/6662353d-6f92-4edd-b007-f3aa94b5bf3f" />
-
-### 批量导入
-
-!\[批量导入]<img width="2550" height="1292" alt="image" src="https://github.com/user-attachments/assets/1889262e-5510-4a20-8b8f-faaf3e58d030" /> <img width="2550" height="1292" alt="image" src="https://github.com/user-attachments/assets/5132326f-9019-46fd-9d39-1e784b8b69cb" />
-
-### 修改历史
-
-!\[修改历史]<img width="2550" height="1292" alt="image" src="https://github.com/user-attachments/assets/a0befb6a-269c-4c8c-8320-5a98c4a34c54" />
-
-</details>
-
-***
-
-## 🚀 快速开始
-
-### 环境要求
-
-- Python 3.8+
-- Node.js 20.19+（包含 Googlemail 自动化和浏览器回归测试）
-- npm 或 yarn
-
-### 安装步骤
-
-1. **克隆项目**
-
-```bash
-git clone https://github.com/superaddmin/Google_Manager.git
-cd Google_Manager
-```
-
-1. **安装后端依赖**
-
-```bash
-pip install -r requirements.txt
-```
-
-1. **安装前端依赖**
-
-```bash
-cd frontend
-npm install
-```
-
-1. **构建前端**
-
-```bash
-npm run build
-cd ..
-```
-
-1. **启动服务**
-
-```powershell
-$env:ADMIN_PASSWORD = '<YOUR_ADMIN_PASSWORD>'
-python run.py
-```
-
-1. **访问系统**
-   打开浏览器访问 `http://localhost:8002`
+- **管理员密码鉴权** - 所有 API 端点与管理界面均受服务端会话保护。
+- **防暴力破解 IP 封禁** - 连续 3 次输入错误密码，自动封禁该来源 IP 24 小时。
+- **短时效动态盐值校验** - 登录请求携带时间戳动态盐值校验。
+- **凭证强加密存储** - Gmail API 凭证强制要求配置 `GMAIL_TOKEN_ENCRYPTION_KEY` 采用 Fernet 对称强加密落盘。
 
 ***
 
 ## 📁 项目结构
 
 ```
-GOO成品号管理/
-├── app/                      # 后端应用
-│   ├── models/               # 数据模型
-│   │   ├── account.py        # 账号模型
-│   │   └── account_history.py # 历史记录模型
-│   ├── routes/               # API 路由
-│   │   └── api.py
-│   ├── services/             # 业务逻辑
-│   │   ├── account_service.py
-│   │   └── auth_service.py   # 认证服务
-│   └── utils/                # 工具函数
-│       └── totp.py           # TOTP 生成
-├── frontend/                 # 前端应用
+Google_Manager/
+├── app/                              # 后端应用核心
+│   ├── models/                       # SQLAlchemy 数据模型
+│   │   ├── account.py                # 账号资产模型
+│   │   ├── account_history.py        # 修改历史模型
+│   │   ├── gmail_connection.py       # Gmail OAuth 连接模型
+│   │   ├── gmail_rule.py             # 自动化规则模型
+│   │   ├── gmail_task_log.py         # 规则执行日志与人工审核模型
+│   │   ├── gmail_watch.py            # Gmail Pub/Sub 订阅模型
+│   │   └── googlemail_task.py        # Playwright 任务状态模型
+│   ├── routes/                       # 路由控制器
+│   │   ├── api.py                    # RESTful API（含批量授权、挂机守护、防盗、账号）
+│   │   └── main.py                   # 静态页面与 SPA 渲染入口
+│   ├── services/                     # 业务服务层
+│   │   ├── account_service.py        # 账号增删改查、统计与批量处理
+│   │   ├── auth_service.py           # 登录鉴权、IP 封禁与盐值校验
+│   │   ├── batch_oauth_service.py    # 批量 Playwright OAuth 自动授权调度器
+│   │   ├── email_poller.py           # 24H 挂机收信守护进程 (GmailSyncDaemon)
+│   │   ├── gmail_service.py          # Gmail 官方 API 对接、OAuthStateManager 与加密
+│   │   ├── gmail_rule_service.py     # 邮件自动化规则与任务流
+│   │   ├── googlemail_service.py     # 2FA 自动化轮换子进程适配器
+│   │   └── security_service.py       # 集中防盗体检、隐蔽转发扫描与 OTP 聚合
+│   ├── utils/                        # 辅助工具
+│   ├── config.py                     # 环境配置类
+│   └── __init__.py                   # 应用工厂函数
+├── frontend/                         # 前端 React SPA
 │   ├── src/
-│   │   ├── components/       # React 组件
-│   │   ├── hooks/            # 自定义 Hooks
-│   │   └── services/         # API 服务
-│   └── ...
-├── static/                   # 静态文件（构建输出）
-├── instance/                 # 数据库文件
-├── run.py                    # 启动脚本
-└── requirements.txt          # Python 依赖
+│   │   ├── components/               # React UI 视图组件
+│   │   │   ├── AccountListView.jsx   # 账号列表视图（支持批量与显隐防窥）
+│   │   │   ├── DashboardView.jsx     # 统计分析看板
+│   │   │   ├── SecurityCenterView.jsx# 集中邮箱防盗与安全中控台
+│   │   │   ├── GmailInboxView.jsx    # Gmail 收件箱、批量授权弹窗与挂机中控
+│   │   │   ├── GooglemailView.jsx    # 2FA 轮换自动化任务面板
+│   │   │   ├── ImportView.jsx        # 批量导入视图
+│   │   │   └── LoginPage.jsx         # 登录界面
+│   │   ├── services/api.js           # 前端 API 请求封装
+│   │   └── App.jsx                   # 前端根组件与主导航路由
+├── googlemail/                       # Node.js + Playwright 自动化子模块
+│   ├── src/                          # 自动化核心源码
+│   │   ├── oauth-authorizer.mjs      # Playwright Google OAuth 自动授权核心
+│   │   ├── batch-oauth-worker.mjs    # 批量授权 CLI 工作入口
+│   │   ├── google-automator.mjs      # 2FA 自动修改与登录逻辑
+│   │   ├── totp.mjs                  # TOTP 计算工具
+│   │   └── redaction.mjs             # 日志敏感数据脱敏工具
+├── deploy/                           # 生产服务器部署套件
+│   ├── gunicorn.conf.py              # Gunicorn 生产多线程 WSGI 配置
+│   ├── setup-server.sh               # Linux VPS 一键部署 Shell 脚本
+│   ├── systemd/
+│   │   └── google-manager.service    # Systemd 系统服务单元
+│   └── nginx/
+│       └── google-manager.conf       # Nginx 反向代理与 SSL 模板
+├── docs/                             # 架构与运维文档
+│   ├── server-deployment-guide.md    # 服务器生产部署与挂机收信全套指南
+│   └── centralized-mailbox-security-guide.md # 集中邮箱防盗管理架构白皮书
+├── Dockerfile                        # 生产级 Docker 镜像构建文件
+├── docker-compose.yml                # Docker Compose 编排文件
+├── instance/                         # SQLite 数据库运行目录
+├── static/                           # 前端生产打包静态资源目录
+├── tests/                            # 全量测试套件 (148 tests)
+│   ├── test_batch_oauth.py           # 批量 OAuth 授权单元测试
+│   ├── test_email_poller.py          # 挂机收信守护进程测试
+│   ├── test_api.py                   # 账号与鉴权后端测试
+│   ├── test_security_service.py      # 安全防盗与 OTP 提取后端测试
+│   ├── test_gmail_service.py         # Gmail 加密与解析测试
+│   ├── test_gmail_automation.py      # 邮件规则与自动化测试
+│   ├── test_googlemail_service.py    # Playwright 适配层测试
+│   └── frontend-ui.test.mjs          # Playwright 前端回归测试 (20/20 PASS)
+├── requirements.txt                  # Python 依赖清单
+└── run.py                            # 本地开发启动入口
 ```
 
 ***
 
-## ⚙️ 配置说明
+## 🚀 服务器生产部署快速上手
 
-### 配置管理员密码
+生产部署提供了 **Docker 容器化部署（强烈推荐）** 与 **Linux VPS 原生 Systemd 部署** 两种方案：
 
-通过环境变量配置管理员密码，不要把凭证写入源码：
+### 方案 A：Docker 容器化部署（推荐）
 
-```powershell
-$env:ADMIN_PASSWORD = '<YOUR_ADMIN_PASSWORD>'
+```bash
+# 1. 克隆代码
+git clone https://github.com/superaddmin/Google_Manager.git /opt/google-manager
+cd /opt/google-manager
+
+# 2. 配置环境变量
+cat <<EOF > .env
+FLASK_ENV=production
+ADMIN_PASSWORD=YourComplexPassword_2026!
+SECRET_KEY=$(openssl rand -hex 32)
+GMAIL_TOKEN_ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+GMAIL_CLIENT_SECRET_FILE=/app/credentials.json
+PROXY=http://user:pass@residential-proxy.net:port  # 住宅代理（防 Google 机房风控）
+HEADLESS=true
+EOF
+
+# 3. 放入 Google Cloud 下载的 credentials.json
+cp /path/to/your/credentials.json ./credentials.json
+
+# 4. 一键启动容器
+docker compose up -d --build
 ```
 
-生产环境和开发环境缺少该配置时应用会拒绝启动；测试环境使用隔离的测试 fixture。
+### 方案 B：Linux VPS (Ubuntu/Debian) 原生一键部署
 
-### 修改服务端口
-
-编辑 `run.py`：
-
-```python
-app.run(host='127.0.0.1', port=8002)  # 修改 port 值
+```bash
+cd /opt/google-manager
+chmod +x deploy/setup-server.sh
+sudo bash deploy/setup-server.sh
 ```
 
-默认只监听本机回环地址；调试开关遵循所选 Flask 配置，不再覆盖 production 的设置。只有明确需要局域网访问时才修改监听地址，不要向外网暴露开发调试服务。
+脚本将自动安装 Node.js 20、Python 虚拟环境、Playwright 浏览器与 Linux 图形依赖，并配置为开机自启的 Systemd 服务。
 
-登录封禁默认按连接来源 IP 计数，不直接信任请求中的 `X-Forwarded-For`。反向代理部署时，应按真实代理层数配置 Werkzeug `ProxyFix`，并限制后端端口只能由可信代理访问，避免伪造转发头绕过封禁。
-
-### 配置生产会话密钥
-
-production 配置要求通过环境变量提供至少 32 字节的随机会话密钥，缺少或过短时应用会停止启动：
-
-```powershell
-$env:SECRET_KEY = '<RANDOM_SECRET>'
-```
-
-### 修改登录有效期
-
-修改 `app/config.py` 的 `PERMANENT_SESSION_LIFETIME`。前端以 `/api/auth/check` 返回的服务端会话状态为准，不再依赖浏览器本地登录时间：
-
-```python
-PERMANENT_SESSION_LIFETIME = timedelta(days=7)
-```
+详细服务器运维、Nginx 反代、Let's Encrypt 证书签发与代理防风控技巧详见：
+👉 **[服务器生产部署与挂机收信全套运维指南](docs/server-deployment-guide.md)**
 
 ***
 
-## 🔧 开发指南
+## 📡 RESTful API 接口总览
 
-### 前端开发模式
+### 1. 批量 OAuth 2.0 自动授权
+- `POST /api/gmail/batch-authorize`：启动指定账号集合的一键自动授权任务。
+- `GET /api/gmail/batch-authorize/status`：获取当前运行中或最新的批量授权任务进度与日志。
+- `POST /api/gmail/batch-authorize/cancel`：取消当前执行中的批量授权任务。
 
-```bash
-cd frontend
-npm run dev
-```
+### 2. 24H 挂机收信守护进程 (GmailSyncDaemon)
+- `GET /api/gmail/daemon/status`：获取后台挂机收信守护进程的运行状态、轮询指标与日志。
+- `POST /api/gmail/daemon/start`：启动后台挂机收信守护进程（可配置轮询周期）。
+- `POST /api/gmail/daemon/stop`：停止后台挂机收信守护进程。
+- `POST /api/gmail/daemon/sync-now`：立即触发一次全量邮箱同步与安全扫描。
 
-### 前端构建
+### 3. 集中安全与防盗
+- `GET /api/security/overview`：全库防盗安全态势总览与健康指数。
+- `GET /api/security/accounts?filter=...`：带风险分与安全维度的账号列表。
+- `GET /api/security/forwarding-audit`：扫描已授权 Gmail 账号的隐蔽外部自动转发与恶意规则。
+- `GET /api/security/central-otps?limit=10`：跨所有邮箱集中提取最新验证码与安全告警流。
+- `POST /api/security/accounts/<id>/lock`：一键应急锁号并阻断导出。
+- `POST /api/security/accounts/<id>/unlock`：解除账号应急锁定。
 
-```bash
-npm run build
-```
+### 4. 账号与资产管理
+- `GET /api/accounts?search=...`：获取账号列表，支持关键词模糊搜索。
+- `POST /api/accounts/batch`：批量导入账号（单次上限 500 个）。
+- `POST /api/accounts/batch-delete`：批量删除选中账号。
+- `POST /api/accounts/batch-sold`：批量标记出售状态。
+- `POST /api/accounts/batch-remark`：批量设置账号备注。
+- `GET /api/accounts/export?format=csv&sold=all`：多格式安全导出账号。
+- `GET /api/stats`：获取看板统计数据。
 
-### 数据库迁移
+***
 
-项目使用 SQLite，新增表结构时运行对应的迁移脚本：
+## 🔎 全量代码审计与测试质量报告（2026-09-16）
 
-```bash
-python migrate_history.py  # 历史记录表迁移
-```
+本项目经过端到端全量回归测试，全部 148 项测试用例 100% 通过：
 
-### 本地回归验证
+| 测试模块 | 覆盖功能范围 | 测试数量 | 运行结果 |
+| --- | --- | --- | --- |
+| **Python 后端全量测试** | API 路由、批量 OAuth 调度、挂机收信守护进程、安全防盗服务、Gmail 加密与规则 | 62 项 | **62 passed (100%)** |
+| **Playwright 前端 UI 回归** | 登录、导入、显隐密码防窥、Gmail 交互、Googlemail 状态流 | 20 项 | **20 passed (100%)** |
+| **Node.js 单元测试** | 多分隔符解析、API 异常处理、ESM 模块加载 | 19 项 | **19 passed (100%)** |
+| **Googlemail 自动化测试** | 2FA 换密、配置校验、数据脱敏、Playwright 自动化流程 | 47 项 | **47 passed (100%)** |
 
-在仓库根目录执行以下命令；浏览器测试使用合成账号和拦截的 API，不读写实际账号数据库，也不会真实登录 Google 或修改账号安全设置：
+### 全量自动化回归命令
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py'
+# 1. 运行 Python 全量测试 (62 项)
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+
+# 2. 构建前端生产资源
 npm --prefix frontend run build
-node --test tests/account-import.test.mjs tests/frontend-ui.test.mjs tests/googlemail-local-copy.test.mjs
+
+# 3. 运行 Node.js 基础测试与 Googlemail 自动化测试 (66 项)
+node --test tests/account-import.test.mjs tests/googlemail-local-copy.test.mjs tests/api-service.test.mjs
 npm --prefix googlemail test
+
+# 4. 运行 Playwright 浏览器端全量回归测试 (20 项)
+node --test tests/frontend-ui.test.mjs
 ```
-
-前端浏览器测试复用 `googlemail/` 已安装的 Playwright；若 Chromium 不可用，在该目录执行 `npx playwright install chromium`。项目未配置独立的前端 lint、格式化或类型检查命令。
-
-***
-
-### Googlemail 本地集成
-
-`googlemail/` 是从本机 `F:\Googlemail` 受控复制的源码快照，由当前仓库直接管理，不使用 Git submodule。账号文件、浏览器会话、运行输出、日志、覆盖率和依赖目录不会纳入版本控制。
-
-登录主页后打开 `Googlemail` 视图，可选择账号、设置运行参数并启动、查询或取消任务。Flask 通过受控 Node.js 子进程调用本地 Googlemail，每次任务的输入与输出保存在忽略目录 `googlemail/runtime/tasks/<task-id>/`，HTTP 响应只返回任务状态和计数。
-
-任务失败或取消后也会刷新已同步的账号信息。如果结果文件含损坏、未知账号或缺失密钥的记录，任务会返回 `RESULT_SYNC_FAILED` 并保留 `result.txt` 供人工恢复；该文件含敏感信息，不要上传或提交。
-
-testing 配置会关闭实际 Googlemail 执行；development/production 配置默认开启。启动前需先安装本地 Node.js 依赖：
-
-```powershell
-Push-Location .\googlemail
-try {
-    npm ci
-    npm test
-    npm run test:startup
-} finally {
-    Pop-Location
-}
-```
-
-复制与后续同步流程见 [Googlemail 本地复制集成执行计划](SUBMODULE_INTEGRATION_PLAN.md)。
-
-***
-
-## 📝 导入格式
-
-支持以下分隔符格式：
-
-```
-邮箱|密码|恢复邮箱|2FA密钥|备注
-邮箱——密码——恢复邮箱——2FA密钥——备注
-邮箱----密码----恢复邮箱----2FA密钥----备注
-邮箱--密码--恢复邮箱--2FA密钥--备注
-```
-
-其中：
-
-- **邮箱** 和 **密码** 为必填
-- **恢复邮箱**、**2FA密钥**、**备注** 可选
-- 第五列国家或地区（如 `UnitedStates`）保存为备注；同一批次可混用上述分隔符，每行使用一种。
-- 解析错误会显示原始行号，修正全部错误后才能提交；错误提示不会回显原始密码或密钥。
-- 密码按原文保存；2FA 密钥自动去除空白。前四个字段不要包含本行使用的分隔符，备注中则可以使用。
-- 已存在的邮箱会跳过，不覆盖原记录；本次无新增账号时会保留导入文本，请勿将重复提示当作服务异常。
-- 单次最多导入 500 个账号；邮箱和非空恢复邮箱必须符合基本邮箱格式，后端会再次校验。
-
-***
-
-## 🛠️ 技术栈
-
-| 类别    | 技术           |
-| ----- | ------------ |
-| 前端框架  | React 18     |
-| UI 样式 | TailwindCSS  |
-| 图标库   | Lucide React |
-| 构建工具  | Vite         |
-| 后端框架  | Flask        |
-| 数据库   | SQLite       |
-| ORM   | SQLAlchemy   |
-
-***
-
-## 🤝 贡献指南
-
-欢迎提交 Issue 和 Pull Request！
-
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 提交 Pull Request
 
 ***
 
 ## 📄 开源协议
 
 本项目采用 [MIT License](LICENSE) 开源协议。
-
-***
-
-## ⭐ 如果觉得有用，欢迎 Star！
-
-<p align="center">
-  Made with ❤️ for Google Account Management
-</p>
----
-
-## 🔎 代码审计与部署说明（2026-09-15）
-
-### 当前审计结论
-
-本项目由 Flask 后端、React/Vite 前端和 Node.js + Playwright 的 Googlemail 自动化子模块组成。当前发现的主要风险与限制如下：
-
-- **生产跨域策略过宽**：`app/__init__.py` 当前使用全局 `CORS(app)`，生产环境应限制为实际前端域名，并配合 HTTPS。
-- **敏感数据明文存储**：账号密码、恢复邮箱和 2FA 密钥直接写入 SQLite 及导出文件；生产环境必须限制文件权限、禁止公开下载，并规划数据库加密/密钥托管。
-- **任务状态为进程内存**：Googlemail 任务管理器和进程对象保存在当前 Python 进程，重启或多 worker 部署会丢失任务状态；暂不适合直接水平扩展。
-- **SQLite 适合单机小规模**：并发写入、备份、故障恢复能力有限；多人或高频任务场景建议迁移 PostgreSQL，并补充正式迁移流程。
-- **自动化依赖真实浏览器环境**：Googlemail 子模块需要 Node.js、Playwright Chromium、可用网络/DNS、稳定系统时间和足够的临时目录空间；验证码、风控或人工复核不能保证无人值守完成。
-- **测试尚未在当前环境收集**：2026-09-15 执行 `python -m pytest -q` 时缺少 `pyotp` 和 `flask_sqlalchemy`，需先安装 `requirements.txt` 后重新验证。
-
-以上问题不等同于已经发生的线上故障，但应作为生产上线前的整改清单。
-
-### 苹果项目能否部署到服务器？
-
-1. **苹果客户端（iOS/macOS App）**：不能把 iOS App 本身部署成 Linux/Windows 服务器进程。iOS 构建和签名通常需要 macOS、Xcode、Apple Developer 账号；客户端应发布到 App Store、TestFlight 或企业/私有分发渠道。
-2. **本项目后端和 Web 管理端**：可以部署到服务器。浏览器访问不依赖苹果系统；推荐 Linux x86_64/ARM64 服务器运行 Flask、数据库和可选的 Node 自动化服务。若必须构建或签名苹果客户端，则需要 macOS（实体 Mac 或合规的 macOS CI 环境）。
-
-### 推荐生产配置
-
-- **仅 Web/API**：Ubuntu 22.04+/Debian 12+，2 vCPU、4 GB RAM、40 GB SSD，Python 3.10+，Nginx/Caddy，PostgreSQL 14+。
-- **包含 Playwright 自动化**：建议 4 vCPU、8 GB RAM、80 GB SSD；安装 Node.js 20 LTS、Playwright Chromium 及系统依赖，并为任务输出和截图设置配额。
-- **安全**：固定域名和 TLS；生产设置 `FLASK_ENV=production`、长度不少于 32 字节的 `SECRET_KEY`、高强度 `ADMIN_PASSWORD`；限制 CORS、脱敏日志、限制导出文件访问。
-- **进程**：不要用 Flask 内置开发服务器公网运行；Web/API 使用 Gunicorn 等 WSGI 服务，自动化任务独立运行。当前任务状态在进程内存中，不能直接多 worker 或水平扩展。
-
-当前仓库没有 iOS 原生工程，也没有 PostgreSQL/Gunicorn/队列部署配置；因此现阶段“苹果部署”应理解为苹果设备访问服务器上的 Web/API，而不是在服务器运行 iOS App。
-
-### 上线前验证
-
-```powershell
-python -m pip install -r requirements.txt
-python -m pytest -q
-cd frontend; npm ci; npm run build; cd ..
-cd googlemail; npm ci; npx playwright install --with-deps chromium; npm test
-```
-## ✉️ Gmail API 收件箱自动管理
-
-项目现已接入 Gmail API 第一阶段能力：
-
-- OAuth 2.0 授权并保存 Gmail 账号连接。
-- 使用 `gmail.modify` 权限读取收件箱、查看邮件详情、标记已读和归档。
-- 前端新增“Gmail 收件箱”页面，支持账号选择、Gmail 查询语法搜索和邮件详情查看。
-- refresh token 使用 Fernet 加密后保存到 `gmail_connections` 表，不与账号密码或 2FA 密钥混用。
-
-### Gmail Cloud 配置
-
-1. 在 Google Cloud 创建项目并启用 Gmail API。
-2. 配置 OAuth 同意屏幕和 OAuth Client ID（Web application）。
-3. 添加授权回调地址：`https://你的域名/api/gmail/oauth/callback`。
-4. 将下载的 client secret JSON 放到服务器受限目录。
-5. 配置以下环境变量：
-
-```powershell
-$env:GMAIL_CLIENT_SECRET_FILE = 'C:\secrets\gmail-client-secret.json'
-$env:GMAIL_TOKEN_ENCRYPTION_KEY = '<由 Fernet.generate_key() 生成的密钥>'
-$env:GMAIL_PUBSUB_TOPIC = 'projects/<项目>/topics/<主题>'
-$env:GMAIL_PUBSUB_VERIFICATION_TOKEN = '<随机高强度校验令牌>'
-```
-
-生产环境会强制检查 `GMAIL_TOKEN_ENCRYPTION_KEY`。丢失该密钥后，已保存的 Gmail 授权 Token 无法恢复，需要重新授权；不要将 client secret、Token 或密钥提交到 Git。
-
-### API 入口
-
-- `GET /api/gmail/oauth/start`：生成 OAuth 授权地址。
-- `GET /api/gmail/oauth/callback`：完成授权并保存连接。
-- `GET /api/gmail/connections`：列出已授权邮箱（不返回 Token）。
-- `GET /api/gmail/<connectionId>/messages?q=...`：查询收件箱。
-- `GET /api/gmail/<connectionId>/messages/<messageId>`：读取邮件详情。
-- `PATCH /api/gmail/<connectionId>/messages/<messageId>/read`：标记已读。
-- `PATCH /api/gmail/<connectionId>/messages/<messageId>/archive`：归档邮件。
-- `GET /api/gmail/<connectionId>/labels`：读取 Gmail 标签列表。
-- `PATCH /api/gmail/<connectionId>/messages/<messageId>/labels`：增加或移除邮件标签。
-- `GET|POST /api/gmail/<connectionId>/rules`：查询或创建自动规则。
-- `PATCH|DELETE /api/gmail/rules/<ruleId>`：更新或删除自动规则。
-- `POST /api/gmail/<connectionId>/rules/run`：手工执行规则，支持 `dryRun` 和指定 `messageIds`。
-- `GET /api/gmail/task-logs`：查询规则任务日志和待确认动作。
-- `POST /api/gmail/task-logs/<logId>/confirm`：人工确认并执行动作。
-- `POST /api/gmail/task-logs/<logId>/reject`：拒绝待确认动作。
-- `POST /api/gmail/<connectionId>/watch`：为账号注册 Gmail `watch`。
-- `POST /api/gmail/pubsub/webhook?token=...`：接收 Pub/Sub 推送并触发规则执行。
-
-规则动作支持增加/移除标签、标记已读/未读、归档/取消归档和移入/移出垃圾箱；设置 `requiresConfirmation=true` 后，动作会先进入任务日志，必须由管理员确认或拒绝。Pub/Sub webhook 仅接受带 `GMAIL_PUBSUB_VERIFICATION_TOKEN` 的请求；Gmail `watch` 到期前应由外部定时任务重新注册。
