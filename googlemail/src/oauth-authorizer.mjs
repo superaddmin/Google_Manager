@@ -93,8 +93,11 @@ async function handleTOTPChallenge(page, secret, logger) {
 /**
  * 处理辅助邮箱确认提示
  */
-async function handleRecoveryEmailChallenge(page, recoveryEmail, logger) {
+async function handleRecoveryEmailChallenge(page, recoveryEmail, logger, attempts = 0) {
   if (!recoveryEmail) return { success: true };
+  if (attempts >= 3) {
+    return { success: false, error: '辅助邮箱验证页面未推进，请人工核对' };
+  }
 
   const recoverySelectors = [
     'input[name="knowledgePreregisteredEmailResponse"]',
@@ -134,7 +137,7 @@ async function handleRecoveryEmailChallenge(page, recoveryEmail, logger) {
     logger('  [安全验证] 点击确认辅助邮箱入口...');
     await recoveryChoice.click().catch(() => {});
     await page.waitForTimeout(2500);
-    return handleRecoveryEmailChallenge(page, recoveryEmail, logger);
+    return handleRecoveryEmailChallenge(page, recoveryEmail, logger, attempts + 1);
   }
 
   return { success: true };
@@ -277,6 +280,12 @@ export async function authorizeGoogleOAuth(page, account, authUrl, logger = cons
   safeLogger(`[OAuth 授权] 开始自动授权账号: ${maskEmail(email)}`);
 
   try {
+    const authorizationUrl = new URL(authUrl);
+    const expectedCallback = new URL(authorizationUrl.searchParams.get('redirect_uri'));
+    const expectedState = authorizationUrl.searchParams.get('state');
+    if (!expectedState || !['http:', 'https:'].includes(expectedCallback.protocol)) {
+      throw new Error('Invalid OAuth callback configuration');
+    }
     // 注入防检测特性
     await page.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -284,7 +293,7 @@ export async function authorizeGoogleOAuth(page, account, authUrl, logger = cons
       Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
     });
 
-    safeLogger(`  [导航] 访问授权链接: ${authUrl.substring(0, 80)}...`);
+    safeLogger('  [导航] 访问授权页面');
     await page.goto(authUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 45000,
@@ -299,24 +308,38 @@ export async function authorizeGoogleOAuth(page, account, authUrl, logger = cons
       const currentUrl = await page.url();
 
       // 1. 检查是否已经重定向到本系统回调接口
-      if (currentUrl.includes('/api/gmail/oauth/callback')) {
+      const currentAddress = new URL(currentUrl);
+      if (currentAddress.origin === expectedCallback.origin && currentAddress.pathname === expectedCallback.pathname) {
+        if (currentAddress.searchParams.get('state') !== expectedState) {
+          authError = '回调状态不匹配，请重新授权';
+          break;
+        }
         safeLogger('  [回调] 已到达授权回调接口，校验响应状态...');
         await page.waitForLoadState('networkidle').catch(() => {});
+        if (await page.url() !== currentUrl) {
+          authError = '回调页面发生跳转，请人工核对授权状态';
+          break;
+        }
         const bodyContent = await page.innerText('body').catch(() => '');
-
-        if (
-          bodyContent.includes('Gmail 授权成功') ||
-          bodyContent.includes('"success":true') ||
-          bodyContent.includes('"success": true') ||
-          bodyContent.includes('授权成功')
-        ) {
+        if (await page.url() !== currentUrl) {
+          authError = '回调页面发生跳转，请人工核对授权状态';
+          break;
+        }
+        let callbackResult;
+        try {
+          callbackResult = JSON.parse(bodyContent);
+        } catch {
+          authError = '回调接口返回无效响应，请人工核对授权状态';
+          break;
+        }
+        if (callbackResult?.success === true && typeof callbackResult.data?.email === 'string'
+            && callbackResult.data.email.toLowerCase() === email.toLowerCase()) {
           safeLogger(`  ✅ [完成] 账号 ${email} 授权成功并完成凭证保存`);
           isAuthorized = true;
           break;
-        } else if (bodyContent.includes('error') || bodyContent.includes('失败')) {
-          authError = `回调接口返回错误: ${bodyContent.substring(0, 200)}`;
-          break;
         }
+        authError = '回调接口未确认目标账号授权成功，请人工核对';
+        break;
       }
 
       // 2. 检查是否在账号选择界面 (Choose an account)
@@ -386,7 +409,11 @@ export async function authorizeGoogleOAuth(page, account, authUrl, logger = cons
       }
 
       // 6. 检查辅助邮箱确认
-      await handleRecoveryEmailChallenge(page, recovery, safeLogger);
+      const recoveryResult = await handleRecoveryEmailChallenge(page, recovery, safeLogger);
+      if (!recoveryResult.success) {
+        authError = recoveryResult.error;
+        break;
+      }
 
       // 7. 检查未验证应用警告（高级 -> 前往不安全）
       const handledWarning = await handleUnverifiedAppWarning(page, safeLogger);
@@ -428,8 +455,9 @@ export async function authorizeGoogleOAuth(page, account, authUrl, logger = cons
       error: failureReason,
       screenshot: path.basename(screenshot),
     };
-  } catch (err) {
-    const errorMsg = `OAuth 自动化异常: ${err.message}`;
+  } catch {
+    // Browser exceptions can contain callback codes, state and account credentials.
+    const errorMsg = 'OAuth 自动化异常，请检查浏览器连接、配置或超时后重试';
     safeLogger(`  [异常] ${errorMsg}`);
     const screenshot = debugScreenshotPath('oauth-fatal');
     await page.screenshot({ path: screenshot, fullPage: true }).catch(() => {});

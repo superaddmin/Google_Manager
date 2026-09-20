@@ -1,0 +1,26 @@
+[Unit]
+Description=Google Manager Persistent Task Worker
+After=network-online.target google-manager.service
+Requires=google-manager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=googlemanager
+Group=googlemanager
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+WorkingDirectory=/opt/google-manager
+EnvironmentFile=/opt/google-manager/.env
+Environment=FLASK_ENV=production
+Environment=PYTHONUNBUFFERED=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ExecStart=/opt/google-manager/.venv/bin/python -m app.worker
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

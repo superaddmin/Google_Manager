@@ -8,7 +8,7 @@ import multiprocessing
 import os
 
 # 绑定监听地址与端口
-bind = os.environ.get('GUNICORN_BIND', '0.0.0.0:8002')
+bind = os.environ.get('GUNICORN_BIND', '127.0.0.1:8002')
 
 # 工作模式与并发配置
 # 使用 gthread 模式，避免多进程 fork 污染 Playwright 子进程与后台守护线程
@@ -27,12 +27,13 @@ keepalive = 5
 loglevel = os.environ.get('GUNICORN_LOG_LEVEL', 'info')
 accesslog = '-'  # 标准输出
 errorlog = '-'   # 标准错误
-access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)sµs'
+access_log_format = '%(h)s %(t)s "%(m)s %(U)s" %(s)s %(b)s %(D)s'
 
 # 进程管理与安全
 # 不预加载应用，确保每个 Worker 独立初始化数据库连接与锁
 preload_app = False
 daemon = False
+umask = 0o077
 
 def on_starting(server):
     server.log.info("Google Manager Gunicorn 服务正在启动...")

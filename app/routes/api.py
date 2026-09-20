@@ -11,10 +11,15 @@ import json
 from datetime import datetime
 
 from flask import Blueprint, request, jsonify, session, current_app, send_file
+from sqlalchemy.exc import SQLAlchemyError
 from app import db
 from app.models.account import Account
 from app.services.account_service import AccountService
-from app.services.auth_service import AuthService
+from app.services.auth_service import (
+    ADMIN_SESSION_TOKEN_KEY,
+    AuthService,
+    is_admin_authenticated,
+)
 from app.services.googlemail_service import (
     GooglemailTaskError,
     GooglemailValidationError,
@@ -351,6 +356,16 @@ def gmail_pubsub_webhook():
         history_id = data.get('historyId')
         if not isinstance(email, str) or not email.strip() or not history_id:
             return error_response('Pub/Sub 消息缺少 Gmail 标识', 400)
+        if isinstance(history_id, bool) or not str(history_id).isdigit() or int(history_id) <= 0:
+            return error_response('Pub/Sub 历史编号无效', 400)
+        if current_app.config['BACKGROUND_TASK_MODE'] == 'queue':
+            if not GmailConnection.query.filter_by(email=email.strip()).first():
+                return success_response({'processed': False, 'reason': 'unknown_connection'})
+            import hashlib
+            from app.services.runtime_queue import RuntimeQueue
+            request_key = hashlib.sha256(f'{email.strip()}:{history_id}'.encode()).hexdigest()
+            job = RuntimeQueue.enqueue('gmail_notification', {'email': email.strip(), 'historyId': str(history_id)}, request_key=request_key)
+            return success_response({'queued': True, 'jobId': job.id}), 202
         result = GmailService.process_notification(email.strip(), str(history_id))
         return success_response(
             {'processed': result is not None, 'result': result},
@@ -398,12 +413,35 @@ def server_error_response(message, error):
     return error_response(message, 500)
 
 
+def admin_session_unavailable_response(error):
+    """Fail closed without exposing database details or leaving a trusted Cookie."""
+    try:
+        db.session.rollback()
+    except SQLAlchemyError:
+        pass
+    session.pop('authenticated', None)
+    session.pop(ADMIN_SESSION_TOKEN_KEY, None)
+    current_app.logger.error('管理员会话存储不可用 (%s)', type(error).__name__)
+    return error_response('认证服务暂不可用，请稍后重试', 503)
+
+
 @api_bp.before_request
 def require_authentication():
     """账号接口必须通过管理员登录会话访问。"""
     public_endpoints = {'api.login', 'api.logout', 'api.check_auth', 'api.gmail_pubsub_webhook', 'api.gmail_oauth_callback'}
-    if request.endpoint not in public_endpoints and not session.get('authenticated'):
-        return error_response('请先登录', 401)
+    if request.endpoint not in public_endpoints:
+        try:
+            if not is_admin_authenticated():
+                return error_response('请先登录', 401)
+        except SQLAlchemyError as error:
+            return admin_session_unavailable_response(error)
+    if request.endpoint != 'api.gmail_pubsub_webhook':
+        from app.services.request_security import protect_write_request
+        rejected = protect_write_request()
+        if rejected:
+            return rejected
+    from app.routes.queued_tasks import queued_task_request
+    return queued_task_request()
 
 
 @api_bp.route('/accounts', methods=['GET'])
@@ -784,8 +822,11 @@ def get_account_history(account_id):
     """
     try:
         # 获取该账号的所有历史记录，按时间倒序
-        if db.session.get(Account, account_id) is None:
+        account = db.session.get(Account, account_id)
+        if account is None:
             return error_response('账号不存在', 404)
+        if account.status == 'locked':
+            return error_response('锁定账号禁止读取修改历史', 403)
         history = AccountHistory.query.filter_by(account_id=account_id)\
             .order_by(AccountHistory.changed_at.desc()).all()
         
@@ -884,6 +925,16 @@ def cancel_googlemail_task(task_id):
     return success_response(data=task, message='Googlemail 任务已请求取消')
 
 
+def clear_admin_session(revoke=True):
+    """Drop admin/OAuth state while retaining independent customer ownership."""
+    recharge_context = session.get('recharge_context')
+    if revoke:
+        AuthService.revoke_admin_session(session.get(ADMIN_SESSION_TOKEN_KEY))
+    session.clear()
+    if isinstance(recharge_context, str) and recharge_context:
+        session['recharge_context'] = recharge_context
+
+
 @api_bp.route('/auth/login', methods=['POST'])
 def login():
     """
@@ -896,9 +947,10 @@ def login():
         登录结果
     """
     client_ip = get_client_ip()
-    
-    # 检查 IP 是否被封禁
-    is_banned, remaining = AuthService.is_ip_banned(client_ip)
+    try:
+        is_banned, remaining = AuthService.is_ip_banned(client_ip)
+    except SQLAlchemyError as error:
+        return admin_session_unavailable_response(error)
     if is_banned:
         hours = remaining // 3600
         minutes = (remaining % 3600) // 60
@@ -910,21 +962,38 @@ def login():
     
     password = data.get('password', '')
     salt = data.get('salt', '')
+
+    if not AuthService.is_valid_password_input(password):
+        return error_response('密码格式无效', 400)
     
     # 验证盐值
     if not salt or not AuthService.verify_salt(salt):
         return error_response('安全验证失败，请刷新页面重试', 400)
     
     if AuthService.verify_password(password, current_app.config['ADMIN_PASSWORD']):
-        # 登录成功，清除失败记录
-        AuthService.clear_failed_attempts(client_ip)
-        session.clear()
-        session.permanent = True
-        session['authenticated'] = True
+        try:
+            AuthService.clear_failed_attempts(client_ip)
+            clear_admin_session()
+            session.permanent = True
+            session['authenticated'] = True
+            lifetime = current_app.permanent_session_lifetime.total_seconds()
+            session[ADMIN_SESSION_TOKEN_KEY] = AuthService.create_admin_session(
+                current_app.config['ADMIN_PASSWORD'],
+                current_app.secret_key,
+                lifetime,
+            )
+        except SQLAlchemyError as error:
+            clear_admin_session(revoke=False)
+            return admin_session_unavailable_response(error)
+        except Exception as error:
+            clear_admin_session(revoke=False)
+            return server_error_response('登录会话创建失败，请稍后重试', error)
         return success_response(message='登录成功')
     else:
-        # 登录失败，记录尝试
-        is_now_banned, remaining_attempts = AuthService.record_failed_attempt(client_ip)
+        try:
+            is_now_banned, remaining_attempts = AuthService.record_failed_attempt(client_ip)
+        except SQLAlchemyError as error:
+            return admin_session_unavailable_response(error)
         
         if is_now_banned:
             return error_response('密码错误次数过多，您的 IP 已被封禁 24 小时', 403)
@@ -935,7 +1004,11 @@ def login():
 @api_bp.route('/auth/logout', methods=['POST'])
 def logout():
     """清除管理员登录会话。"""
-    session.clear()
+    try:
+        clear_admin_session()
+    except SQLAlchemyError as error:
+        clear_admin_session(revoke=False)
+        return admin_session_unavailable_response(error)
     return success_response(message='已退出登录')
 
 
@@ -948,7 +1021,11 @@ def check_auth():
         封禁状态
     """
     client_ip = get_client_ip()
-    is_banned, remaining = AuthService.is_ip_banned(client_ip)
+    try:
+        is_banned, remaining = AuthService.is_ip_banned(client_ip)
+        authenticated = is_admin_authenticated()
+    except SQLAlchemyError as error:
+        return admin_session_unavailable_response(error)
     
     if is_banned:
         hours = remaining // 3600
@@ -956,14 +1033,14 @@ def check_auth():
         return jsonify({
             'success': False,
             'banned': True,
-            'authenticated': bool(session.get('authenticated')),
+            'authenticated': authenticated,
             'message': f'您的 IP 已被封禁，剩余时间：{hours}小时{minutes}分钟'
         })
     
     return jsonify({
         'success': True,
         'banned': False,
-        'authenticated': bool(session.get('authenticated'))
+        'authenticated': authenticated
     })
 
 

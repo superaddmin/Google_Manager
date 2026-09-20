@@ -8,10 +8,12 @@
 
 | 组件      | 技术                    | 版本      |
 | ------- | --------------------- | ------- |
-| 运行时     | Node.js (ESM)         | >=20.19.0 |
-| 浏览器自动化  | Playwright (Chromium) | 1.60.0 |
+| 包声明运行时 | Node.js (ESM) | >=20.19.0 |
+| 生产浏览器运行时 | Node.js | 24.x |
+| 浏览器自动化  | Playwright | 1.63.0 |
+| 生产浏览器 | Chrome for Testing | 153.0.8010.52（固定路径） |
 | TOTP 生成 | otplib                | 13.4.1 |
-| 单元测试 | Vitest + V8 Coverage | 4.1.10 |
+| 单元测试 | Vitest + V8 Coverage | 4.1.11 |
 | 模块类型    | ESM (import/export)   | -       |
 
 ## 项目结构
@@ -20,6 +22,7 @@
 F:\Google_Manager\googlemail\
 ├── src/
 │   ├── config.mjs           # 集中配置管理
+│   ├── browser-runtime.mjs  # 浏览器版本、路径与 sandbox 启动策略
 │   ├── account-parser.mjs   # 账号文件解析 & 进度管理
 │   ├── redaction.mjs        # 日志敏感信息脱敏
 │   ├── totp.mjs             # TOTP 验证码生成与验证
@@ -27,10 +30,12 @@ F:\Google_Manager\googlemail\
 │   ├── main.mjs             # 批量处理入口
 │   ├── test-login.mjs       # 单账号调试入口
 │   ├── verify-2fa.mjs       # 2FA 密钥批量验证
-│   └── startup-check.mjs    # 本地 Chromium 启动烟雾检查
+│   ├── startup-check.mjs    # 本地 Chromium 启动烟雾检查
+│   └── batch-oauth-worker.mjs # 后端批量 OAuth worker 入口
 ├── tests/                   # 单元测试目录
 │   ├── totp.test.mjs        # TOTP 模块测试
-│   └── account-parser.test.mjs  # 账号解析模块测试
+│   ├── account-parser.test.mjs  # 账号解析模块测试
+│   └── browser-runtime.test.mjs # 浏览器运行时策略测试
 ├── docs/
 │   ├── README.md            # 本文件 - 架构文档
 │   ├── configuration.md     # 配置参考
@@ -52,6 +57,7 @@ F:\Google_Manager\googlemail\
 ```
 main.mjs (批量入口)
 ├── config.mjs ───────────── 配置常量
+├── browser-runtime.mjs ──── 统一浏览器安全启动参数
 ├── account-parser.mjs ───── 解析账号文件、管理进度
 ├── google-automator.mjs ─── 核心自动化
 │   ├── totp.mjs ─────────── TOTP 生成/验证
@@ -62,6 +68,7 @@ main.mjs (批量入口)
 
 test-login.mjs (单账号测试)
 ├── config.mjs
+├── browser-runtime.mjs
 ├── account-parser.mjs
 ├── google-automator.mjs
 ├── playwright (chromium)
@@ -71,6 +78,12 @@ verify-2fa.mjs (密钥验证)
 ├── config.mjs
 ├── account-parser.mjs
 └── totp.mjs
+
+batch-oauth-worker.mjs (后端批量 OAuth worker)
+├── config.mjs
+├── browser-runtime.mjs
+├── oauth-authorizer.mjs
+└── playwright (chromium)
 ```
 
 ## 核心数据流
@@ -89,7 +102,7 @@ verify-2fa.mjs (密钥验证)
 ┌─────────────────────────────────────────────┐
 │        loginAndChange2FA()                   │
 │                                             │
-│  1. 反检测脚本注入 (navigator.webdriver等)    │
+│  1. 页面兼容性初始化（不作为安全控制）          │
 │  2. 导航到 Google 登录页                     │
 │  3. 填写邮箱 → 下一步                        │
 │  4. 填写密码 → 下一步                        │
@@ -138,6 +151,27 @@ verify-2fa.mjs (密钥验证)
 | `ACCOUNTS_PER_RECOVERY_EMAIL` | number                  | `5`                           | `ACCOUNTS_PER_RECOVERY` | 每N个账号共享一个恢复邮箱 |
 
 `ACCOUNTS_FILE` 可由同名环境变量覆盖。数值配置使用严格整数校验：延迟不得为负数，`ACCOUNTS_PER_RECOVERY` 必须大于或等于 1。
+
+浏览器选择由 `browser-runtime.mjs` 单独校验。`FLASK_ENV=production` 时，四个浏览器入口都必须通过 `GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH` 指向绝对路径的 Chrome for Testing 153.0.8010.52；生产环境禁止使用 `CHROME_CHANNEL` 代替固定制品。
+
+### browser-runtime.mjs - 浏览器运行时安全策略
+
+该模块同时服务 `chromium.launch()` 和 `chromium.launchPersistentContext()`，导出：
+
+| 导出 | 说明 |
+| --- | --- |
+| `EXPECTED_CHROME_VERSION` | 当前批准的生产浏览器精确版本 `153.0.8010.52` |
+| `getBrowserLaunchOptions(options?, env?)` | 合并并校验路径、channel、sandbox 与调用方启动参数 |
+| `assertExpectedChromeVersion(actual, env?)` | 在生产启动检查中精确核对浏览器版本 |
+| `cleanupBrowserStartup(resources, removeDirectory)` | 尽力关闭两类浏览器资源并清理临时 profile，失败信息只包含固定资源标签 |
+
+安全边界：
+
+- 生产环境缺少 `GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH`、路径不是绝对路径，或同时设置 `CHROME_CHANNEL` 时直接失败。
+- 所有入口强制 `chromiumSandbox: true`，并拒绝调用方覆盖 `executablePath`、`channel`、`chromiumSandbox` 或传入禁用 sandbox 的参数。
+- 精确版本断言由生产 `startup-check.mjs` 执行；正式入口不重复查询版本，因此发布门禁必须在同一不可变镜像和同一浏览器路径上先运行启动检查。
+- 本地非生产开发可在未固定路径时使用 Playwright 1.63.0 捆绑浏览器，也可通过 `CHROME_CHANNEL` 选择本地 channel。这两种方式都不能作为生产安全基线。
+- 外置 CfT 与 Playwright 的精确组合仍须在最终镜像中动态验收；实现上述校验并不表示生产验收已完成。
 
 ### account-parser.mjs - 账号解析模块
 
@@ -245,7 +279,7 @@ interface Result {
 1. 解析账号文件；没有有效账号时停止，不启动浏览器
 2. 创建带时间戳的日志文件并加载进度
 3. 显示运行配置摘要
-4. 启动持久化浏览器上下文 (Chromium)，支持 `PROXY` 和 `CHROME_CHANNEL` 环境变量
+4. 通过共享浏览器运行时启动持久化上下文；支持 `PROXY`，非生产环境可选 `CHROME_CHANNEL`
 5. 逐账号处理：
    - 跳过已完成和失败的账号
    - 计算目标恢复邮箱 (基于 `RECOVERY_EMAIL_POOL` 和 `ACCOUNTS_PER_RECOVERY_EMAIL`)
@@ -281,7 +315,7 @@ targetRecoveryEmail = RECOVERY_EMAIL_POOL[poolIndex];
 
 固定以非无头模式（`headless: false`）、`slowMo: 300` 运行，自动执行完整登录+2FA修改流程后，浏览器窗口保持打开以便手动检查结果。按 Ctrl+C 退出。
 
-**注意：** 此脚本不支持 `PROXY`、`CHROME_CHANNEL`、`HEADLESS`、`SLOW_MO` 等环境变量。
+**注意：** 此脚本不支持 `PROXY`、`HEADLESS`、`SLOW_MO` 等运行行为覆盖；浏览器选择仍由共享运行时处理，因此非生产可使用 `CHROME_CHANNEL`，生产模式必须提供 `GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH`。
 
 ### verify-2fa.mjs - 2FA 密钥验证
 
@@ -299,18 +333,16 @@ targetRecoveryEmail = RECOVERY_EMAIL_POOL[poolIndex];
 
 **启动命令：** `npm run test:startup`
 
-启动无头 Chromium 并加载本地 `data:` 页面，不读取账号文件、不使用 `browser-data/`，也不访问 Google 页面。
+分别通过 `chromium.launch()` 和临时目录中的 `chromium.launchPersistentContext()` 启动无头浏览器，仅加载本地页面，验证 JavaScript、`zh-CN` locale、内存截图与退出清理。它不读取账号文件、不复用 `browser-data/`，也不访问 Google 页面。生产模式会额外要求固定绝对路径，并精确核对浏览器版本为 `153.0.8010.52`。
 
-## 反检测机制
+## 浏览器安全边界
 
-Playwright 浏览器启动时注入以下脚本避免被 Google 检测为自动化工具：
+- Playwright 版本已精确固定为 1.63.0；生产浏览器必须固定为 CfT 153.0.8010.52，不能只依赖 Playwright 捆绑 revision。
+- `main.mjs`、`test-login.mjs`、`batch-oauth-worker.mjs` 和 `startup-check.mjs` 共用同一套路径与 sandbox 规则。
+- 浏览器必须以 sandbox 开启状态运行；不得通过环境变量或调用参数提供关闭后门。
+- 现有页面兼容性初始化脚本不是安全隔离，也不能保证第三方页面不会识别自动化环境。
+- 版本、下载来源、SHA-256、目标架构、容器 sandbox 和完整动态门禁见[浏览器运行时安全基线](../../docs/browser-security-baseline-2026-09-20.md)。文档中的门禁在最终镜像验证完成前仍保持待确认。
 
-```javascript
-Object.defineProperty(navigator, 'webdriver', { get: () => false });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
-// 修改 permissions.query 通知权限
-```
 
 ## 资源管理
 

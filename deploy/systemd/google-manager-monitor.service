@@ -1,0 +1,19 @@
+[Unit]
+Description=Google Manager Read-only Operational Checks
+After=network-online.target google-manager.service google-manager-worker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=googlemanager
+Group=googlemanager
+WorkingDirectory=/opt/google-manager
+EnvironmentFile=/opt/google-manager/.env
+Environment=FLASK_ENV=production
+ExecStart=/opt/google-manager/.venv/bin/python -m app.monitor
+TimeoutStartSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/google-manager/instance

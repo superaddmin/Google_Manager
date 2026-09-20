@@ -22,6 +22,7 @@ const GmailInboxView = ({ darkMode }) => {
     const [connections, setConnections] = useState([]);
     const [connectionId, setConnectionId] = useState('');
     const [messages, setMessages] = useState([]);
+    const [nextPageToken, setNextPageToken] = useState('');
     const [selected, setSelected] = useState(null);
     const [query, setQuery] = useState('');
     const [loading, setLoading] = useState(false);
@@ -32,6 +33,7 @@ const GmailInboxView = ({ darkMode }) => {
     const [showDaemonPanel, setShowDaemonPanel] = useState(false);
     const [daemonStatus, setDaemonStatus] = useState(null);
     const [daemonLoading, setDaemonLoading] = useState(false);
+    const [syncNotice, setSyncNotice] = useState('');
     const [syncInterval, setSyncInterval] = useState(180);
 
     // 批量授权弹窗与任务状态
@@ -49,31 +51,77 @@ const GmailInboxView = ({ darkMode }) => {
     const [batchMessage, setBatchMessage] = useState('');
 
     const logEndRef = useRef(null);
+    const connectionIdRef = useRef('');
+    const messagesRequestIdRef = useRef(0);
+    const messageDetailRequestIdRef = useRef(0);
+
+    const changeConnection = (nextConnectionId) => {
+        const normalizedId = String(nextConnectionId || '');
+        connectionIdRef.current = normalizedId;
+        messagesRequestIdRef.current += 1;
+        messageDetailRequestIdRef.current += 1;
+        setConnectionId(normalizedId);
+        setMessages([]);
+        setNextPageToken('');
+        setSelected(null);
+        setLoading(false);
+        setError('');
+    };
+
+    const changeQuery = (nextQuery) => {
+        messagesRequestIdRef.current += 1;
+        messageDetailRequestIdRef.current += 1;
+        setQuery(nextQuery);
+        setMessages([]);
+        setNextPageToken('');
+        setSelected(null);
+        setLoading(false);
+        setError('');
+    };
 
     const loadConnections = async () => {
         try {
             const result = await api.getGmailConnections();
             const list = result.data || [];
             setConnections(list);
-            if (!connectionId && list.length) {
-                setConnectionId(String(list[0].id));
+            if (!connectionIdRef.current && list.length) {
+                changeConnection(list[0].id);
             }
         } catch (err) {
             setError(err.message || '加载 Gmail 连接失败');
         }
     };
 
-    const loadMessages = async () => {
-        if (!connectionId) return;
+    const loadMessages = async ({ append = false, pageToken = '', searchQuery = query } = {}) => {
+        const ownerConnectionId = connectionIdRef.current;
+        if (!ownerConnectionId) return;
+        const requestId = ++messagesRequestIdRef.current;
+        if (!append) {
+            messageDetailRequestIdRef.current += 1;
+            setMessages([]);
+            setNextPageToken('');
+            setSelected(null);
+        }
         setLoading(true);
         setError('');
         try {
-            const result = await api.getGmailMessages(connectionId, query);
-            setMessages(result.data?.messages || []);
+            const result = await api.getGmailMessages(ownerConnectionId, searchQuery, pageToken);
+            if (messagesRequestIdRef.current !== requestId || connectionIdRef.current !== ownerConnectionId) return;
+            const pageMessages = result.data?.messages || [];
+            setMessages(currentMessages => {
+                if (!append) return pageMessages;
+                const knownIds = new Set(currentMessages.map(message => message.id));
+                return [...currentMessages, ...pageMessages.filter(message => !knownIds.has(message.id))];
+            });
+            setNextPageToken(result.data?.nextPageToken || result.data?.next_page_token || '');
         } catch (loadError) {
-            setError(loadError.message);
+            if (messagesRequestIdRef.current === requestId && connectionIdRef.current === ownerConnectionId) {
+                setError(loadError.message || '加载 Gmail 收件箱失败');
+            }
         } finally {
-            setLoading(false);
+            if (messagesRequestIdRef.current === requestId && connectionIdRef.current === ownerConnectionId) {
+                setLoading(false);
+            }
         }
     };
 
@@ -105,10 +153,14 @@ const GmailInboxView = ({ darkMode }) => {
     // 仅在挂载时加载连接列表（遵循原有单测路由契约）
     useEffect(() => {
         loadConnections().catch(loadError => setError(loadError.message));
+        return () => {
+            messagesRequestIdRef.current += 1;
+            messageDetailRequestIdRef.current += 1;
+        };
     }, []);
 
     useEffect(() => {
-        loadMessages();
+        loadMessages({ searchQuery: query });
     }, [connectionId]);
 
     // 仅在展开挂机面板后开启定期轮询
@@ -168,8 +220,14 @@ const GmailInboxView = ({ darkMode }) => {
     const syncNow = async () => {
         setDaemonLoading(true);
         setError('');
+        setSyncNotice('');
         try {
-            await api.syncGmailDaemonNow();
+            const result = await api.syncGmailDaemonNow();
+            if (result.data?.status === 'pending' || result.data?.status === 'queued') {
+                setSyncNotice(result.message || '同步任务已排队');
+                await loadDaemonStatus();
+                return;
+            }
             await loadDaemonStatus();
             await loadMessages();
         } catch (err) {
@@ -243,15 +301,33 @@ const GmailInboxView = ({ darkMode }) => {
     };
 
     const openMessage = async (message) => {
-        const result = await api.getGmailMessage(connectionId, message.id);
-        setSelected(result.data);
+        const ownerConnectionId = connectionIdRef.current;
+        const requestId = ++messageDetailRequestIdRef.current;
+        setError('');
+        try {
+            const result = await api.getGmailMessage(ownerConnectionId, message.id);
+            if (messageDetailRequestIdRef.current !== requestId || connectionIdRef.current !== ownerConnectionId) return;
+            setSelected(result.data);
+        } catch (detailError) {
+            if (messageDetailRequestIdRef.current === requestId && connectionIdRef.current === ownerConnectionId) {
+                setError(detailError.message || '加载 Gmail 邮件失败');
+            }
+        }
     };
 
     const modify = async (message, action) => {
-        if (action === 'read') await api.markGmailMessageRead(connectionId, message.id);
-        if (action === 'archive') await api.archiveGmailMessage(connectionId, message.id);
-        await loadMessages();
-        if (selected?.id === message.id) setSelected(null);
+        const ownerConnectionId = connectionIdRef.current;
+        setError('');
+        try {
+            if (action === 'read') await api.markGmailMessageRead(ownerConnectionId, message.id);
+            if (action === 'archive') await api.archiveGmailMessage(ownerConnectionId, message.id);
+            if (connectionIdRef.current !== ownerConnectionId) return;
+            await loadMessages({ searchQuery: query });
+        } catch (modifyError) {
+            if (connectionIdRef.current === ownerConnectionId) {
+                setError(modifyError.message || (action === 'archive' ? '归档邮件失败' : '标记邮件失败'));
+            }
+        }
     };
 
     const panel = darkMode
@@ -381,6 +457,12 @@ const GmailInboxView = ({ darkMode }) => {
                         </div>
                     </div>
 
+                    {syncNotice && (
+                        <div className="mt-3 p-3 rounded-lg border border-blue-500/30 bg-blue-500/10 text-blue-500 text-xs">
+                            {syncNotice}
+                        </div>
+                    )}
+
                     {/* 指标条 */}
                     {daemonStatus && (
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 pt-3 border-t border-slate-500/20 text-xs">
@@ -410,7 +492,7 @@ const GmailInboxView = ({ darkMode }) => {
                 <div className="flex flex-wrap gap-3">
                     <select
                         value={connectionId}
-                        onChange={event => setConnectionId(event.target.value)}
+                        onChange={event => changeConnection(event.target.value)}
                         className={`rounded-lg border px-3 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-indigo-500/50 min-w-[220px] ${
                             darkMode
                                 ? 'bg-slate-800/80 border-slate-700 text-slate-200'
@@ -428,8 +510,8 @@ const GmailInboxView = ({ darkMode }) => {
                     </select>
                     <input
                         value={query}
-                        onChange={event => setQuery(event.target.value)}
-                        onKeyDown={event => event.key === 'Enter' && loadMessages()}
+                        onChange={event => changeQuery(event.target.value)}
+                        onKeyDown={event => event.key === 'Enter' && loadMessages({ searchQuery: query })}
                         placeholder="搜索 Gmail，例如 from:github.com"
                         className={`flex-1 min-w-[240px] rounded-lg border px-3 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-indigo-500/50 ${
                             darkMode
@@ -438,7 +520,7 @@ const GmailInboxView = ({ darkMode }) => {
                         }`}
                     />
                     <button
-                        onClick={loadMessages}
+                        onClick={() => loadMessages({ searchQuery: query })}
                         disabled={!connectionId || loading}
                         className="px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-medium shadow-sm transition"
                     >
@@ -505,6 +587,18 @@ const GmailInboxView = ({ darkMode }) => {
                                     </div>
                                 </div>
                             ))}
+                            {nextPageToken && (
+                                <div className="p-3 text-center">
+                                    <button
+                                        type="button"
+                                        onClick={() => loadMessages({ append: true, pageToken: nextPageToken, searchQuery: query })}
+                                        disabled={loading}
+                                        className="px-4 py-2 rounded-lg border text-xs font-medium hover:bg-slate-500/10 disabled:opacity-50 transition"
+                                    >
+                                        {loading ? '加载中...' : '加载更多'}
+                                    </button>
+                                </div>
+                            )}
                             {!loading && connectionId && !messages.length && (
                                 <p className="p-8 text-center text-sm opacity-70">收件箱暂无匹配邮件</p>
                             )}

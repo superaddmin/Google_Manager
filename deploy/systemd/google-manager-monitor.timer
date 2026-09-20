@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Google Manager readiness and backlog every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+Unit=google-manager-monitor.service
+
+[Install]
+WantedBy=timers.target

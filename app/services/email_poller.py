@@ -30,6 +30,7 @@ class GmailSyncDaemon:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.RLock()
+        self._sync_lock = threading.Lock()
 
         # 状态指标
         self.is_running = False
@@ -69,15 +70,17 @@ class GmailSyncDaemon:
         with self._lock:
             if self.is_running:
                 return self.status()
+            if self._thread and self._thread.is_alive():
+                raise RuntimeError('收信线程正在停止，请稍后重试')
 
             self.interval_seconds = max(int(interval_seconds), 30)
-            self._stop_event.clear()
+            self._stop_event = threading.Event()
             self.is_running = True
             self._log(f'🚀 挂机收信守护进程已启动，轮询周期: {self.interval_seconds}秒')
 
             self._thread = threading.Thread(
                 target=self._loop,
-                args=(app,),
+                args=(app, self._stop_event),
                 name='gmail-sync-daemon',
                 daemon=True,
             )
@@ -96,13 +99,13 @@ class GmailSyncDaemon:
 
     def sync_once(self, app) -> dict:
         """立即执行一次全量邮箱同步与安全扫描。"""
-        with app.app_context():
+        with self._sync_lock, app.app_context():
             return self._perform_sync()
 
-    def _loop(self, app):
-        while not self._stop_event.is_set():
+    def _loop(self, app, stop_event):
+        while not stop_event.is_set():
             try:
-                with app.app_context():
+                with self._sync_lock, app.app_context():
                     self._perform_sync()
             except Exception as err:
                 with self._lock:
@@ -111,41 +114,49 @@ class GmailSyncDaemon:
                     self._log(f'❌ 挂机收信异常: {err}')
 
             # 等待下一轮轮询，支持被 stop_event 提前唤醒
-            self._stop_event.wait(self.interval_seconds)
+            stop_event.wait(self.interval_seconds)
 
     def _perform_sync(self) -> dict:
         start_time = time.time()
         synced_conn_count = 0
         new_messages_count = 0
         alerts_count = 0
+        failed_count = 0
 
         connections = GmailConnection.query.all()
         self._log(f'🔄 开始轮询检查 {len(connections)} 个已授权 Gmail 连接...')
 
         for conn in connections:
-            if self._stop_event.is_set():
+            if self.is_running and self._stop_event.is_set():
                 break
 
             try:
-                # 1. 查询未读或最新邮件
-                list_res = GmailService.list_messages(conn, query='is:unread', max_results=10)
-                msgs = list_res.get('messages', [])
-                if msgs:
-                    new_messages_count += len(msgs)
-                    self._log(f'  📧 [{conn.email}] 收到 {len(msgs)} 封未读邮件')
-
-                    # 2. 执行规则引擎过滤与打标
-                    try:
-                        GmailRuleService.run_rules(
-                            conn,
-                            message_ids=[m['id'] for m in msgs if m.get('id')],
-                            max_messages=len(msgs),
-                        )
-                    except Exception as rule_err:
-                        self._log(f'    ⚠️ 规则执行跳过: {rule_err}')
+                message_ids = []
+                page_token = None
+                seen_tokens = set()
+                while True:
+                    list_res = GmailService.list_messages(conn, query='is:unread', max_results=100, page_token=page_token)
+                    message_ids.extend(message['id'] for message in list_res.get('messages', []) if message.get('id'))
+                    page_token = list_res.get('nextPageToken')
+                    if not page_token:
+                        break
+                    if page_token in seen_tokens:
+                        raise GmailServiceError('邮件分页异常')
+                    seen_tokens.add(page_token)
+                message_ids = list(dict.fromkeys(message_ids))
+                new_messages_count += len(message_ids)
+                for offset in range(0, len(message_ids), 100):
+                    summary = GmailRuleService.run_rules(conn, message_ids=message_ids[offset:offset + 100], max_messages=100)
+                    if summary.get('failed'):
+                        failed_count += summary['failed']
+                        self._log('邮件规则执行失败，保留任务等待下一轮重试')
 
                 # 3. 隐蔽转发与过滤器排查
                 audit_res = SecurityService.audit_forwarding_and_filters(conn)
+                if audit_res.get('hasErrors') or audit_res.get('status') == 'error':
+                    failed_count += 1
+                    self._log('邮箱安全审计失败，等待下一轮重试')
+                    continue
                 if audit_res.get('hasSuspiciousForwarding') or audit_res.get('suspiciousFiltersCount', 0) > 0:
                     alerts_count += 1
                     self._log(f'  ⚠️ [{conn.email}] 发现可疑转发出站规则或转发配置！')
@@ -153,9 +164,13 @@ class GmailSyncDaemon:
                 synced_conn_count += 1
 
             except GmailServiceError as g_err:
-                self._log(f'  ⚠️ [{conn.email}] 同步跳过: {g_err}')
+                db.session.rollback()
+                failed_count += 1
+                self._log('邮箱同步失败：' + type(g_err).__name__)
             except Exception as err:
-                self._log(f'  ⚠️ [{conn.email}] 处理异常: {err}')
+                db.session.rollback()
+                failed_count += 1
+                self._log('邮箱同步失败：' + type(err).__name__)
 
         duration = time.time() - start_time
         with self._lock:
@@ -165,12 +180,15 @@ class GmailSyncDaemon:
             self.connections_synced = synced_conn_count
             self.messages_polled += new_messages_count
             self.alerts_detected += alerts_count
+            self.error_count += failed_count
+            self.last_error = '本轮同步存在失败项，等待重试' if failed_count else None
             self._log(f'✅ 本轮挂机收信完成: 耗时 {round(duration, 2)}s，处理 {new_messages_count} 封新邮件')
 
         return {
             'connectionsSynced': synced_conn_count,
             'messagesPolled': new_messages_count,
             'alertsDetected': alerts_count,
+            'failed': failed_count,
             'durationSeconds': round(duration, 2),
         }
 

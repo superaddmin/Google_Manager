@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import threading
@@ -21,6 +22,7 @@ from app.models.account import Account
 from app.models.account_history import AccountHistory
 from app.models.gmail_connection import GmailConnection
 from app.services.gmail_service import GmailService, OAuthStateManager
+from app.services.googlemail_service import PASSTHROUGH_ENVIRONMENT_KEYS
 
 
 TERMINAL_STATUSES = {'completed', 'failed', 'cancelled'}
@@ -66,6 +68,7 @@ class BatchOAuthTaskRecord:
             'startedAt': self.started_at,
             'finishedAt': self.finished_at,
             'errorMessage': self.error_message,
+            'cancelRequested': self.cancel_requested,
             'logs': self.logs[-100:],  # 最近 100 条脱敏日志
             'results': self.results,
         }
@@ -143,6 +146,8 @@ class BatchOAuthManager:
                     raise BatchOAuthError('未找到有效的账号记录')
 
                 for acc in accounts:
+                    if acc.status == 'locked':
+                        raise BatchOAuthError('锁定账号禁止执行批量授权')
                     if not acc.password:
                         continue
                     # 生成专属 authorization_url 并自动把 State 注册到 OAuthStateManager
@@ -166,9 +171,11 @@ class BatchOAuthManager:
             task_file = task_dir / 'tasks.json'
 
             task_dir.mkdir(parents=True, exist_ok=True)
+            task_dir.chmod(0o700)
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            with task_file.open('w', encoding='utf-8') as f:
+            descriptor = os.open(task_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as f:
                 json.dump(task_items, f, ensure_ascii=False, indent=2)
 
             record = BatchOAuthTaskRecord(
@@ -204,8 +211,6 @@ class BatchOAuthManager:
             if record.status in TERMINAL_STATUSES:
                 return record
             record.cancel_requested = True
-            record.status = 'cancelled'
-            record.finished_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
             proc = record.process
 
         if proc and proc.poll() is None:
@@ -217,18 +222,51 @@ class BatchOAuthManager:
             ).start()
         return record
 
+    def cancel_for_account(self, account_id):
+        with self._lock:
+            identifiers = [record.task_id for record in self._tasks.values()
+                           if account_id in record.account_ids and record.status not in TERMINAL_STATUSES]
+        for identifier in identifiers:
+            self.cancel_task(identifier)
+
     def _terminate_process(self, process):
+        stopped = False
+        process_id = getattr(process, 'pid', None)
         try:
-            process.terminate()
+            if os.name == 'nt' and isinstance(process_id, int):
+                result = subprocess.run(
+                    ['taskkill', '/PID', str(process_id), '/T', '/F'],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+                stopped = result.returncode == 0
+            elif os.name != 'nt' and isinstance(process_id, int):
+                os.killpg(os.getpgid(process_id), signal.SIGTERM)
+                stopped = True
+            if not stopped:
+                process.terminate()
             process.wait(timeout=5)
+            stopped = process.poll() is not None
         except Exception:
             try:
-                process.kill()
+                process_id = getattr(process, 'pid', None)
+                if os.name != 'nt' and isinstance(process_id, int):
+                    os.killpg(os.getpgid(process_id), signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=5)
+                stopped = process.poll() is not None
             except Exception:
-                pass
+                stopped = process.poll() is not None
+        return stopped
 
     def _run_worker(self, app, record: BatchOAuthTaskRecord):
         process = None
+        exit_code = None
+        worker_error = None
+        process_stopped = True
         try:
             with self._lock:
                 if record.cancel_requested:
@@ -236,7 +274,11 @@ class BatchOAuthManager:
                 record.status = 'running'
                 record.started_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
 
-            env = os.environ.copy()
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key.upper() in PASSTHROUGH_ENVIRONMENT_KEYS
+            }
             env.update({
                 'OAUTH_TASKS_FILE': str(record.task_file),
                 'OUTPUT_DIR': str(record.output_dir),
@@ -258,10 +300,14 @@ class BatchOAuthManager:
                 encoding='utf-8',
                 errors='replace',
                 creationflags=creation_flags,
+                start_new_session=os.name != 'nt',
             )
 
             with self._lock:
                 record.process = process
+                cancelled = record.cancel_requested
+            if cancelled:
+                process_stopped = self._terminate_process(process)
 
             # 读取子进程标准输出
             if process.stdout:
@@ -280,23 +326,23 @@ class BatchOAuthManager:
                         with self._lock:
                             record.logs.append({
                                 'time': datetime.now(timezone.utc).strftime('%H:%M:%S'),
-                                'message': stripped,
+                                'message': '自动授权任务运行中',
                             })
 
             exit_code = process.wait()
-            with self._lock:
-                if record.status not in TERMINAL_STATUSES:
-                    record.status = 'completed' if exit_code == 0 else 'failed'
-                record.finished_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
-
+            process_stopped = process.poll() is not None
         except Exception as err:
-            with self._lock:
-                record.status = 'failed'
-                record.error_message = str(err)
-                record.finished_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            worker_error = type(err).__name__
         finally:
-            with self._lock:
-                record.process = None
+            if process is not None and process.poll() is None:
+                process_stopped = self._terminate_process(process)
+
+            if not process_stopped:
+                with self._lock:
+                    record.status = 'finalizing'
+                    record.error_message = 'PROCESS_STOP_UNCONFIRMED'
+                    record.process = process
+                return
 
             # 清理含敏感明文的临时任务文件
             try:
@@ -307,6 +353,11 @@ class BatchOAuthManager:
 
             # 同步最终结果到数据库与记录
             self._sync_final_results(app, record)
+            with self._lock:
+                record.process = None
+                record.status = 'cancelled' if record.cancel_requested else ('completed' if exit_code == 0 and not worker_error else 'failed')
+                record.error_message = worker_error
+                record.finished_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
 
     def _handle_event(self, app, record: BatchOAuthTaskRecord, event: dict):
         ev_type = event.get('event')

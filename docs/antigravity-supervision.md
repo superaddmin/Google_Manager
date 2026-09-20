@@ -1,241 +1,101 @@
 # Antigravity 工作督办与验收台账
 
-## 当前负责人结论
+> 本台账按 2026-09-19 工作区源码、配置、测试和部署文件复核。它记录可从仓库复核的事实和仍未取得的证据，不代表已经启动后台监督，也不代表已经批准真实充值、订阅变更或生产发布。
 
-- 当前修复轮次：2026-09-19，Asia/Shanghai，承接 9 月 18 日 23:44 起的失败回归。用户已要求直接修复；本轮在保留其他 Agent 既有修改的前提下修复并验收，第九节保留为历史失败证据。
-- 状态：**本轮四类已复现缺陷及相关前端回归通过 / 不签认“全部缺陷闭环、全覆盖” / 整体 No-Go**。本轮交付详情见 `docs/recharge-fixes-2026-09-19.md`。
-- 本轮完整离线回归 **204/204 通过**：Python 113、Node 19、Googlemail 47、前端 UI 25；包含三个共享 SQLite 的独立子进程测试。构建与 pip check 通过，已同步 `static`，HTML/JS/CSS 与隔离浏览器验收构建的 SHA-256 一致。没有取得全量分支覆盖率报告。
-- 本轮修复：live 拒绝生成本地模拟凭证；challenge 强制套餐且绑定会话、模式、卡密、凭据、续费参数并在共享数据库一次消费；普通/批量 OAuth 回调统一原子消费；unknown 经查询持久核对、结构化关联上游编号，数据库级拦截同卡密重复创建，终态不被迟到响应覆盖。
-- 前端专项回归覆盖提交凭据一致及清空、unknown 轮询/退避/终态停止、切页停止轮询、账单旧响应隔离、live 下载入口关闭。真实浏览器连接隔离 Flask 后端的 Mock 创建、查询、两类 TXT 下载、模拟取消/恢复续费和切页清空通过；旧固定账单号返回 404。
-- **部署边界**：9 月 18 日 22:09–22:10 已记录 Docker Linux 引擎可达；本轮没有重新验证引擎、构建镜像或运行业务容器。正式授权上游、真实交付/凭证、旧卡密隐私迁移、完整 CSRF 与守护部署验收仍未完成，不以隔离测试代替生产放行。
-- 模式说明：源码中非测试配置默认 disabled；`TestingConfig` 明确为 mock，不能表述为“所有环境默认 disabled”。本轮未检查或修改真实环境密钥/运行配置，不据此证明已部署环境的实际模式。
-- 本文件是负责人下发的共享督办清单，**未取得 Antigravity 会话的接收/执行回执**。不把写入文件等同于已经通知到其对话。
+## 当前结论
 
-## 一、监督方式与职责
+- 当前结论为 **No-Go**。代码已经具备充值模式门禁、持久化任务、一次性挑战令牌、数据库级运行队列、独立 worker 和就绪检查；真实上游契约、生产 Linux 运行、Google OAuth/Gmail 实际授权、备份恢复和容量验证仍未在本工作区完成。
+- 非测试配置的 `RECHARGE_MODE` 默认值是 `disabled`；`TestingConfig` 明确使用 `mock`。生产配置只接受 `disabled` 或 `live`，生产启动会拒绝 `mock`、未知模式、弱密钥、无效 Fernet 密钥和示例管理员密码。
+- 本次复核没有把旧文档中的 156/167/173/204 等历史测试数字当作当前结果。当前测试入口和失败边界见“验证记录”；本机执行受到 Windows `spawn EPERM` 和临时目录 ACL 限制，因此不能把本次命令写成全量通过。
+- 任何“代码已存在”只表示静态实现已核对；只有可复现的命令、退出码和环境记录才能把条目标为“已验收”。
+
+## 监督规则
 
 | 角色 | 职责 |
 | --- | --- |
-| 用户 / 项目负责人 | 决定范围、真实操作授权及最终生产发布 |
-| Antigravity（实施方） | 按问题 ID 最小化修改、补回归、提供真实测试结果与交付记录 |
-| 本审查方（监督验收 / 本轮修复） | 核对工作区、复现问题、按用户要求最小化修复并验证；以本轮文件基线保护其他实施方修改，维护交付与阻塞记录 |
+| 用户 / 项目负责人 | 决定范围、真实第三方操作授权和最终发布 |
+| Antigravity（实施方） | 按问题 ID 修改代码、补回归并提交可复核证据 |
+| 审查方 | 对照源码、配置和测试独立复核；记录证据边界与遗留风险 |
 
-- 状态仅使用：待接收、待修复、实施方自报完成、待验收、验收未通过、已验收、外部阻塞。
-- “有代码”不等于“已验收”；“应用进程运行”不等于“Agent 正在执行任务”；不根据文件数量估算完成百分比。
-- 每轮必须记录：问题 ID、变更文件、代码快照/提交、测试命令、退出码、结果、未覆盖范围及遗留风险。
-- 仅在本轮主动检查期间采样，不宣称后台定时监督已启动。需要下一轮检查时重新读取现场，不沿用旧状态。
-- 禁止未经授权真实充值、撤回/关闭订单、变更订阅、登录账号、发布镜像或删除工作区数据。
+- 状态只使用：待接收、待修复、实施方自报完成、待验收、验收未通过、已验收、外部阻塞。
+- 每次交付必须写出问题 ID、变更文件、命令、退出码、结果、未覆盖范围和回滚方式。
+- 禁止未经明确授权的真实充值、撤回/关闭订单、订阅变更、真实账号登录、镜像发布和工作区数据删除。
+- 本台账只描述主动检查时的现场，不承诺后台轮询或持续监督。
 
-## 二、16:23 轮次现场与进度证据（历史）
+## 已核对的当前实现
 
-本节为当时记录；当前修复状态以本文件顶部、第三节、第十节及本轮修复说明为准。
+### 充值模式与任务状态
 
-- 17:18 仍观察到 Antigravity 应用进程，窗口标题包含“运行主页测试 - Google_Manager”；这不是 Agent 内部执行状态或接单回执，不能据此断言正在施工或卡住。
-- HEAD 仍为 `92d452c3b11e0098e87801594188283b7071718d`，存在大量既有未提交内容；没有新的提交不代表没有代码进展。
-- 修订计划最后修改：12:18；Antigravity `walkthrough.md` 已于 **16:24:30** 更新，不能再描述为“未更新”。但其全关闭、套餐强绑定、下载闭环等声明与本轮证据冲突，验收退回。
-- `app/routes/api.py` 于 **16:20:07** 更新：批量 OAuth、守护、安全中心路由及 OAuth 公开入口已恢复，对应既有回归通过；有效批量回调仍有另一处 state 消费缺陷。
-- 前端充值组件于 15:27:32、API 层于 15:24:37、充值测试于 15:29:22 更新。模式徽标、查询分流、轮询和合法 challenge 测试均有实际进展。
-- `source-snapshot.json` 覆盖的 64 个源文件在本轮回归与 17:28 最终比对间未变化。结论限于记录的文件集合，不代表整个工作区或 Agent 会话完全静止。
+- `app/services/recharge_service.py` 定义 `disabled`、`mock`、`live` 三种模式。`disabled` 在路由层返回 503；`mock` 只写入本地 `RechargeTask`，任务标记 `is_mock=true`；`live` 先持久化 `pending` 任务，再在锁外调用 `RECHARGE_UPSTREAM_URL`，请求携带 `idempotency_key` 和 `client_task_no`。
+- live 上游异常或返回未知业务结果会把任务置为 `unknown`，不会降级为模拟成功。任务查询会按任务号或卡密调用上游并回写状态；worker 的维护循环会查询最多 20 条 `pending`、`processing`、`unknown` 或存在未知变更的 live 任务。
+- 任务状态为 `pending`、`processing`、`unknown`、`completed`、`failed`、`recalled`、`closed`。`closed` 卡密不能再次提交；`recall` 和 `close` 都要求绑定邮箱及 `confirmed=true`，并由 `RechargeMutation` 抑制重复的 live 写操作。
+- `recharge_tasks`、`recharge_operations`、`recharge_mutations`、`one_time_tokens` 是数据库模型；原始 challenge 不落库，仅记录 token_hash、binding 等元数据，任务记录不保存原始 challenge。
+- challenge 有效期为 300 秒，只能使用一次，并绑定当前会话上下文、模式、卡密、凭证、套餐和续费标志。允许的套餐是 `PLUS`、`PRO`、`Pro 5x`、`CLAUDE_CODE`、`FINISHED`、`KYC`；除 `FINISHED` 外均要求凭证，`PLUS`/`PRO` 的 JSON 凭证必须含 `accessToken`，`KYC` 凭证必须是 HTTP(S) 链接。
+- 公共充值接口允许匿名客户访问，但写请求必须是 JSON 对象、带 `X-Requested-With: XMLHttpRequest`，并通过 Origin/Fetch 元数据检查；IP 和卡密各按数据库 `RequestLimit` 做 60 次/分钟限制（测试配置为 10000）。管理员 API 仍由 Flask 会话保护。
+- 账单查询、取消续费、恢复续费在 `mock` 模式使用进程内模拟订阅状态；live 模式只转发上游。模拟账单下载是带事实任务或当前会话模拟账单的 TXT；live 下载明确返回 503，不能描述为已提供真实 PDF 或正式发票。
 
-### 已观察到的正向修复（仅验收到所列场景）
+### OAuth、Gmail 与后台任务
 
-| 项目 | 当前证据 | 验收状态 |
-| --- | --- | --- |
-| disabled 模式阻断调用 | 假 CDK 请求返回 503，Mock 网络调用次数为 0 | 单场景已验收；模式全集仍未通过 |
-| live 超时不再假装取消续费成功 | Mock 超时返回 502，success=false | 单场景已验收；任务未知结果恢复未完成 |
-| 未提交 CDK 查询不再死锁 | 查询返回 200/idle | 单场景已验收；并发与跨进程另测 |
-| 拒绝未签发 challenge | 任意假 challenge 创建返回 400 | 单场景已验收；会话/套餐/凭证绑定未完成 |
-| 任务数据库模型 | 新增 `app/models/recharge_task.py` 并注册建表 | 已实施，验收未通过：明文卡密、幂等/模式隔离不足 |
-| 部署基础安全 | Compose 必填密钥、127.0.0.1 绑定；ignore 增补秘密；工厂拒绝部分示例值 | 静态核查有改善，镜像构建与运行未验收 |
-| 路由与既有回归恢复 | Python 81 项全通过，原缺失路径相关测试恢复 | SUP-01 已验收；不代表 OAuth 真实授权闭环 |
-| 前端与 Mock 基础联调 | 页面模式标识、验证、创建、查询、轮询、撤回可用 | 所列 Mock 路径已验收，真实履约与下载另列阻塞 |
-| 安全中心与锁号保护 | 扫描异常汇总/非干净状态、锁号保护与导出脱敏代码已加入，现有相关回归通过 | 确认修复进展；生产权限、多 worker 与守护恢复另行验收 |
+- Gmail OAuth 状态由 `OAuthStateManager` 写入 `one_time_tokens`，有效期 30 分钟；若 session 中存在 state，query state 必须匹配，随后还必须是数据库中已注册、未过期且未消费的 state 才会在回调成功或错误时消费。无 session state 的后台/无头回调仍可凭数据库中的有效注册 state 继续；session 不匹配、未注册或过期的 state 会被拒绝且不消费，重复回调会被拒绝。
+- `RuntimeJob`/`RuntimeState` 和 `RuntimeQueue` 为批量 OAuth、Googlemail 自动化、Gmail 通知、同步和守护状态提供共享数据库队列。`app/worker.py` 使用 `worker.lock` 保证单个后台 worker 实例，并在重启时恢复或失败标记中断任务。
+- `/health/ready` 检查数据库、worker 心跳、Gmail 凭据可读性、维护失败次数、自动化任务锁和 Gmail 动作重试状态；队列模式下 worker 心跳失效会返回 503。
+- Gmail token 使用 `GMAIL_TOKEN_ENCRYPTION_KEY` 的 Fernet 加密；Gmail 服务读取连接时会拒绝对应的锁定账号，账号 API 还禁止读取 2FA、历史和敏感导出字段。数据库本身仍保存账号密码、恢复邮箱和 TOTP secret，生产部署必须限制数据库文件权限。
 
-## 三、立即督办：阻断项清单
+## 督办项
 
-| ID | 优先级 | 当前状态 | 问题与责任范围 | 关闭条件 |
-| --- | --- | --- | --- | --- |
-| SUP-01 | 最高 | 已验收 | 既有批量 OAuth、守护、安全中心 API 路由回退已修复 | 现有对应回归通过；关闭范围仅限本项路由回退 |
-| SUP-02 | 最高 | 已验收 | 普通/批量回调统一消费共享数据库 state；session-only 未注册状态、重放、取消回调和不匹配会话均拒绝；跨进程并发只有一次消费成功 | 关闭本项 state 消费缺陷；保留 account_id/metadata，不代表 Google 真实授权或批量执行器生产验收 |
-| SUP-03 | 高 | 已验收 | 充值测试已改用合法签发 challenge，任务前置成功有断言；当前回归通过 | 关闭旧测试失配问题；套餐、会话和跨 worker 缺口仍在 SUP-06 |
-| SUP-04 | 高 | 已验收 | 非法模式请求 503，production 拒绝 mock/非法值；非测试配置默认 disabled | 关闭模式枚举/默认值/生产禁 mock 这组原缺陷；live 下载的独立分支违规仍归 SUP-11 |
-| SUP-05 | 高 | 验收未通过 | 本轮已验收 unknown 查询回写、上游编号持久关联、模式隔离、迟到终态保护、同卡密跨进程唯一门禁；未新增原始 challenge 存储 | 仍须完成旧卡密/挑战隐私迁移、真实上游幂等契约及运行中故障恢复验收；当前核对由查询驱动，不是后台对账服务 |
-| SUP-06 | 高 | 验收未通过 | 本轮已验收空套餐拒绝、会话/模式/卡密/凭据/续费绑定、TTL 与一次消费、跨进程提交；状态已移入共享数据库 | 本项挑战绑定缺陷已修；完整会话 CSRF 体系仍未完成，不能把 challenge 等同于所有写接口的 CSRF 防护 |
-| SUP-07 | 高 | 已验收 | 新增五项充值 UI 用例；修复立即查询事件参数异常、unknown 轮询及停止/退避、旧账单响应覆盖、成功提交和离开账单页时凭据清空 | 关闭列出的前端缺陷；任务下载仅传本地编号，live 不展示未经验证的凭证下载；不代表全套餐/全浏览器覆盖 |
-| SUP-08 | 高 | 待验收 | 安全扫描与锁号保护有修复且现有回归通过；守护恢复、多 worker、运行身份仍缺生产证据 | 对照原审查逐项提供修复与证据，不把代码存在等同于真实权限/部署验收 |
-| SUP-09 | 高 | 待验收 | Docker Linux Engine 已恢复，Compose 及上游 URL 接线检查通过；镜像/容器未验收，授权上游测试资源仍缺 | 将引擎问题与项目部署验收分开，完成安全构建、健康检查、回调与备份恢复；真实上游保持未放行 |
-| SUP-10 | 中 | 待验收 | 本台账与新增修复说明已更新 204 项实测结果、未覆盖范围及 No-Go；未修改外部 Antigravity walkthrough，也未收到实施方接收回执 | 实施方交付声明仍需与本轮证据对齐，禁止沿用“全覆盖”或未复测的引擎阻塞结论 |
-| SUP-11 | 最高 | 已验收 | disabled/live 下载均拒绝；mock 只接受真实存在的模拟任务或当前会话生成的随机账单标识；固定编号兜底已删除，跨会话账单被拒绝 | 关闭跨模式伪凭证漏洞；真实凭证能力明确未开放，等待正式上游契约及授权验收 |
-| SUP-12 | 高 | 已验收 | 同进程 Mock 中取消/查询保持 false、恢复/查询为 true，另一虚构 token 不受影响；浏览器状态一致 | 仅关闭隔离单进程测试生命周期的原回滚缺陷；不代表跨进程、重启或真实订阅验收 |
+| ID | 状态 | 当前事实 | 关闭条件 |
+| --- | --- | --- | --- |
+| SUP-01 | 实施方自报完成 | 充值模式枚举、challenge 绑定、状态机和一次性消费已写入服务与模型 | 运行 Python 充值回归，并在独立进程/重启后复核共享 SQLite 行为 |
+| SUP-02 | 实施方自报完成 | OAuth state、充值任务、操作变更和运行队列均有数据库记录；OAuth state 有 30 分钟 TTL | 运行跨进程并发消费、重放和重启恢复测试；不得用单进程结果替代 |
+| SUP-03 | 实施方自报完成 | live 创建/撤回/关闭在网络异常时保留 unknown 或 unknown mutation，并由查询核对 | 使用获授权的上游测试契约核对 idempotency、上游任务号和迟到响应 |
+| SUP-04 | 实施方自报完成 | queue 模式由独立 `app.worker` 执行；web 与 worker 共享数据库，健康检查依赖 worker 心跳 | Linux systemd/Docker 实际启动、停止、重启和健康检查通过 |
+| SUP-05 | 外部阻塞 | 生产只允许 disabled/live；上游地址可由 `RECHARGE_UPSTREAM_URL` 配置，但仓库没有真实上游鉴权契约 | 获得授权的 sandbox 上游、鉴权方式、幂等和退款/撤回语义，并完成隔离验收 |
+| SUP-06 | 待验收 | 生产启动校验 `SECRET_KEY`、`ADMIN_PASSWORD`、Gmail Fernet key；账号敏感字段仍在 SQLite 中保存 | 完成密钥轮换、数据库权限、备份保管和敏感数据保留策略验证 |
+| SUP-07 | 外部阻塞 | Dockerfile、Compose、systemd、Nginx 和安装脚本均已更新到 web/worker 双进程模型 | 在目标 Linux 主机完成镜像构建、迁移、HTTPS、回调、恢复和回滚演练 |
+| SUP-08 | 待验收 | 测试文件覆盖充值、OAuth、运行队列、恢复、锁号和安全中心；当前环境未形成全量绿色结果 | 串行运行全部测试并保存退出码，补足真实浏览器和错误路径证据 |
 
-注意：SUP-01/03 仅关闭已定位的路由回退与旧测试失配。禁止整文件回退、删测或用模拟成功掩盖剩余问题；保留其他 Agent 的有效修改。
+## 对外接口核对
 
-## 四、历史装调与独立验收（16:23–17:28）
+当前 Flask 路由由 `app/routes/main.py`、`app/routes/api.py`、`app/routes/recharge.py` 和 `app/routes/queued_tasks.py` 注册。主要入口如下，路径以源码为准：
 
-### 回归、构建与环境
+- 页面与健康：`/`、`/recharge`、`/admin`、`/admin/<path>`、`/health/ready`、`/assets/<path>`。
+- 管理认证：`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/check`。
+- 账号与统计：`/api/accounts`、`/api/accounts/batch`、`/api/accounts/export`、`/api/accounts/batch-delete`、`/api/accounts/batch-sold`、`/api/accounts/batch-remark`、`/api/accounts/<id>`、`/api/accounts/<id>/status`、`/api/accounts/<id>/sold`、`/api/accounts/<id>/2fa`、`/api/accounts/<id>/history`、`GET /api/stats`。
+- Gmail：`/api/gmail/oauth/start`、`/api/gmail/oauth/callback`、`/api/gmail/connections`、消息/标签/规则/任务日志/watch、`/api/gmail/pubsub/webhook`、批量授权和 daemon 系列接口。
+- Googlemail 自动化：`/api/googlemail/status`、`/api/googlemail/tasks`、`/api/googlemail/tasks/<task_id>`、`/api/googlemail/tasks/<task_id>/cancel`。
+- 安全中心：`/api/security/overview`、`/api/security/accounts`、`/api/security/forwarding-audit`、`/api/security/central-otps`、`/api/security/accounts/<id>/lock|unlock`。
+- 充值：`/api/recharge/config`、`agreement`、`features`、`stats/avg-processing-time`、`redeem-codes/validate`、`submission-challenges`、`tasks`、`tasks/<task_no>`、`tasks/lookup`、`tasks/lookup-batch`、`tasks/recall`、`tasks/close`、`tasks/invoice/download`、`billing/query`、`billing/cancel-subscription`、`billing/resume-subscription`、`billing/invoice-file`。
 
-| 验证命令 | 结果 |
-| --- | --- |
-| `.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"` | 81/81，退出码 0；有 utcnow 弃用警告 |
-| `node --test tests/account-import.test.mjs tests/googlemail-local-copy.test.mjs tests/api-service.test.mjs` | 19/19，退出码 0 |
-| `npm --prefix googlemail test` | 47/47，退出码 0 |
-| `node --test tests/frontend-ui.test.mjs` | 20/20，退出码 0 |
-| `npm --prefix frontend run build -- --outDir <证据目录>\frontend-build` | 退出码 0；HTML、JS、CSS 与当前 static 的 SHA-256 一致，没有覆盖 static |
-| `.\.venv\Scripts\python.exe -m pip check` | 通过；仅检查已安装包依赖一致性，不是漏洞或供应链审计 |
-| `docker compose config --quiet` | 退出码 0；version 字段过时警告，不是容器运行通过 |
-| Docker Engine 可用性 | `dockerDesktopLinuxEngine` 命名管道不存在，未执行容器构建和运行验收 |
+JSON 接口返回通常使用 `{success, data, message}`；收据下载成功时返回 UTF-8 文本附件；`/health/ready` 返回组件布尔状态并以 200/503 表示就绪与否；`GET /api/recharge/tasks/<task_no>` 会隐藏 `redeem_code`、`account_email` 和 `notify_email`。
 
-### 真实浏览器连接隔离后端
+## 验证记录
 
-- 环境：本地 loopback 随机端口、`create_app('testing')`、SQLite 内存、Mock 充值、禁止外部充值 HTTP、禁用 Googlemail 执行器；只使用虚构账号/卡密/凭据，不读取真实 `.env` 或账号数据库。
-- 浏览器加载本轮新构建，登录后从页面操作验证 → 人工确认 → 创建 → 任务号查询/自动轮询 → 二次确认撤回；状态变为 `recalled`，撤回按钮消失。此结果只覆盖 Mock 流程，不证明真实充值交付。
-- 页面“对账凭证”和“下载收据 (PDF)”都指向无参数下载地址；读取实际 DOM 链接后请求，HTTP 400，消息为“缺少卡密或任务编号参数”。旧版 405/未导入 datetime 症状已修，不应继续沿用旧描述。
-- Mock 取消自动续费响应 `auto_renew=false`；随后的查询响应 `auto_renew=true`，页面仍为“已开启自动续费”。`billing_query` 硬编码开启状态；这是模拟状态不闭环，不是对真实上游的失败结论。
-- 收尾：页面退出登录、关闭本轮独立标签页；停止本轮服务 PID 55844，确认监听端口不再可达。未终止其他应用，也没有保留后台监督任务。
+静态核对已执行：
 
-### 新增离线探针（全部零外网调用）
+```powershell
+.\.venv\Scripts\python.exe -m pip check
+docker compose config --quiet
+.\.venv\Scripts\python.exe -c "from app import create_app; a=create_app('testing'); print(len(list(a.url_map.iter_rules())))"
+```
 
-| 场景 | 实测结果与定位 |
-| --- | --- |
-| 注册有效批量 OAuth state，无管理员 session 调回调 | HTTP 400，token exchange 调用 0 次，注册 state 未消费；`app/routes/api.py:48` 仍只读取 session |
-| 非法充值模式字符串 | 校验卡密返回 HTTP 200/is_mock=true；`app/services/recharge_service.py:54` 仅排除 disabled |
-| 隔离 production + mock | 工厂接受，服务返回模拟卡密；仅内存数据库和临时虚构密钥，不接触真实生产配置 |
-| PLUS challenge + 同卡密 PRO 请求 | HTTP 201，数据库套餐保存为 PRO；`app/services/recharge_service.py:139` 未比较保存的套餐 |
-| disabled + 不存在任务下载 | HTTP 200、TXT 含 CONFIRMED、数据库无该任务；`app/routes/recharge.py:249` 没有验证履约事实 |
+`pip check` 通过；Compose 配置可解析但提示 `version` 字段已废弃；路由表由测试配置成功加载。下列命令是仓库声明的验证入口，必须在目标环境串行执行并记录退出码：
 
-### 对实施方完成声明的修正
-
-| 自报内容 | 本轮审查判断 |
-| --- | --- |
-| 167 项全通过 | 独立确认，接受此项事实，但不是全功能验收 |
-| 网络请求完全移出锁 | 不成立；`create_task` 仍在 `with cls._lock` 内调用上游，再落库 |
-| 新增数据库表已解决多 worker | 只解决部分任务记录存储；challenge/OAuth state 仍为进程内字典，持久幂等与未知结果恢复未完成 |
-| challenge 卡密/套餐强绑定 | 卡密有检查；套餐不匹配仍能创建，不能关闭 |
-| 发票下载闭环 | 前端缺参 400；补参后后端仍能对不存在任务生成确认文案，不能关闭 |
-| 全部 P0/P1 已关闭、具备生产条件 | 退回验收，维持 No-Go |
-
-证据目录：`C:\Users\www\AppData\Local\Temp\google-manager-commissioning-20260918-d8ce03a8`。保留 `source-snapshot.json`、四组测试日志、`build.log`、`static-comparison.json`、Compose/引擎检查日志、`acceptance-probes-round3.json`、`browser-download-check.json`、`browser-billing-refresh-check.json`、Mock 取消响应、截图及 `fixture-cleanup.json`。该目录是本机临时证据，不是可复用生产配置；正式交付应将脱敏证据归档到项目约定位置。
-
-## 五、历史失败明细（15:20–15:25，非当前回归结果）
-
-本节保留首次督办的现场证据。路由回退与旧测试失配已由本轮全绿结果取代，未修复问题以第三节为准。
-
-命令：
+本轮串行复核已通过以下充值/安全回归：`test_recharge.py` 18/18、`test_recharge_safety.py` 19/19、`test_production_hardening.py` 11/11、`test_oauth_state_safety.py` 4/4、`test_live_recharge_contract.py` 1/1。结果只覆盖这些文件，不代表全量测试或真实上游验收。
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+node --test tests/account-import.test.mjs tests/googlemail-local-copy.test.mjs tests/api-service.test.mjs
+npm --prefix googlemail test
+node --test tests/frontend-ui.test.mjs
+npm --prefix frontend run build
+.\.venv\Scripts\python.exe -m pip check
 ```
 
-| 测试 | 观测 | 判断 |
-| --- | --- | --- |
-| test_oauth_callback_endpoint_accessible_without_session | 预期 400，实际 401 | 既有回调鉴权回退 |
-| test_batch_oauth_api_endpoints | 预期 201，实际 404 | API 缺失 |
-| test_daemon_api_endpoints | 预期 200，实际 404 | API 缺失 |
-| test_security_accounts_and_lock_api | 预期 200，实际 404 | API 缺失 |
-| test_security_overview_api | 预期 200，实际 404 | API 缺失 |
-| test_task_creation_contract_validation | 预期 201，实际 400 | 测试契约未更新；需要独立核对实现，不能放宽安全校验 |
-| test_task_recall_and_close_with_contract_confirmation | 预期 200，实际 400 | 测试前置创建未适配新挑战 |
-| test_task_lookup_and_batch_lookup | KeyError: account_email | 未断言前置创建成功，随后使用错误响应结构 |
+本机执行受到 Windows 临时目录 ACL 和 Node 子进程 `spawn EPERM` 影响，未将失败命令误记为通过；也没有运行真实第三方请求。
 
-- 退出码：1；70 项，7 failures，1 error。
-- 六个抽样关键文件在测试前后 SHA-256 未变化；未因此推断整个工作区完全静止。
-- 本轮不复用旧版 Node/UI/构建通过结果作当前全栈放行；后端恢复后再跑匹配快照的全套验证。
-- 原始测试输出含终端中文编码显示问题，但测试名、状态码和退出码明确；据此判断，不将乱码误认为额外业务错误。
+## 交付要求
 
-### 附加离线验收探针
-
-| 场景 | 实测结果 |
-| --- | --- |
-| disabled 校验卡密 | 503，零网络调用 |
-| live 取消续费超时 | 502 / success=false |
-| 未提交 CDK 查询 | 200 / idle，已返回 |
-| 假挑战创建任务 | 400 |
-| 非法模式字符串 | 200 / is_mock=true，仍需修复 |
-| 既有批量授权/守护/安全中心路径检查 | 三组代表路径均不在路由表 |
-| 原始卡密数据库列 | 存在 |
-| `/api/recharge/csrf` | 不存在 |
-
-证据目录：`C:\Users\www\AppData\Local\Temp\google-manager-supervision-20260918-205b6842`，包含 `python-regression.log` 和 `acceptance-probes.json`。仅使用内存 SQLite、虚构数据与 Mock HTTP，无真实外部写操作。
-
-## 六、Antigravity 下一轮交付要求
-
-1. 先阅读本台账和 `docs/production-readiness-review-2026-09-18.md`，回复接受的 SUP ID、改动范围、预计下一检查点及阻塞项；不要只回复“开始修复”。
-2. 第一批处理 SUP-11/06/02 的新复现路径：live 固定 Mock 发票兜底、空套餐/跨会话/换凭据挑战、session OAuth 二次消费；先补独立失败用例，再针对性修复。
-3. 第二批完成 SUP-05 的 unknown 核对回写、业务唯一性与上下游 ID 映射，并补 SUP-07 的充值 UI 错误路径与生命周期测试。保留 SUP-04/12 已通过行为，不重复推翻有效修复。
-4. SUP-08/09 的多 worker、部署与恢复验收仍是独立门槛；Docker 引擎已可用，不应再用它掩盖内部缺陷。173 是现有套件基线，不等于分支全覆盖，不得删测凑全绿。
-5. 每批交付按“问题 ID → 变更文件 → 命令/结果 → 风险/未完成项”报告。无需为了监督擅自 commit/push；至少提供文件哈希或其他可定位的工作区快照。
-6. 监督方独立复测后才将状态改为已验收；自报完成只能标待验收。真实上游契约需要受控、获授权的测试资源；未验证能力保持禁用，不允许用 Mock 冒充真实交付。
-
-## 七、发布门槛
-
-- 路由回退全部恢复且无既有功能损失。
-- 原审查 P0/P1 与本台账高优先问题均有可复核关闭证据；不只看测试总数。
-- Python、Node、Googlemail、前端 UI 及隔离输出目录构建使用同一版本快照；新增充值 UI 流程和错误路径覆盖。
-- 生产禁 mock、凭证最小化、持久幂等/未知结果、跨进程恢复、下载及 OAuth 均通过相应验证。
-- 容器、权限、TLS、健康检查、备份恢复、依赖支持期完成预发布验收；真实上游未知能力仍禁用。
-- 用户明确批准发布前，不发布、不操作真实资金/账号。本轮发布状态维持 No-Go。
-
-### 历史预发布建议复核（2026-09-18 18:16 起）
-
-以下保留当时状态；21:40 后已有新修复，上游 URL 接线与 Docker 引擎状态以第九节为准。
-
-- “工作区已完全具备预发布联调质量基线”缺少新的关闭证据，不能作为真实卡密预发布或最终交付的放行结论。允许继续隔离 Mock 缺陷复现和内部演示，仅限虚构数据与受控网络，不等于真实履约验收。
-- 仅配置 `SECRET_KEY` 与 `ADMIN_PASSWORD` 不足以启动现有生产部署：`app/__init__.py:40` 和 `docker-compose.yml:21` 同时要求 `GMAIL_TOKEN_ENCRYPTION_KEY`；密钥应通过部署密钥机制注入，不写入报告或提交仓库。
-- 默认保持 `RECHARGE_MODE=disabled`；内部 Mock 使用独立、隔离的测试配置，不把生产接受 Mock 的缺陷当作推荐部署方式。SUP-04/05/06/11 等阻断未关闭前，不启用真实卡密写操作。
-- `RECHARGE_UPSTREAM_URL` 虽已在应用配置中声明，但现有 Compose 未将其传入容器。上游请求适配层也没有通用接入凭据配置/鉴权注入链路，不能笼统声称“配置上游凭据即可接通”；须先确认授权契约、所需鉴权方式和容器配置接线，未知要求不能臆造。
-- 正确推进顺序：修复阻断并补回归 → 准备隔离预发布配置及可用容器引擎 → 核验镜像、HTTPS/回调、数据隔离和恢复 → 使用获授权的测试资源核验上游契约与幂等/超时恢复 → 浏览器走查 → 负责人逐项签收。暂未获得新的环境部署或真实操作授权。
-
-## 八、监督记录
-
-| 时间 | 行为 | 结果 |
-| --- | --- | --- |
-| 2026-09-18 15:20 | 对照应用进程、代码与旧交付记录 | 确认有后续修复，但完成声明过期；内部 Agent 状态未知 |
-| 2026-09-18 15:22 | 独立执行 Python 回归 | 62 通过、7 失败、1 错误；阻断放行 |
-| 2026-09-18 15:24 | 追加离线探针与路由核查 | 确认 4 个单场景改善，非法模式、旧 API 缺失等仍阻塞 |
-| 15:25 首轮交付 | 建立共享台账与下一批督办范围 | 待 Antigravity 接收回执；不宣称已连接其会话或启动后台轮询 |
-| 16:23–16:25 | 独立四组回归、构建及部署前置检查 | 167/167，通过构建与 static 比对；Docker 引擎不可达 |
-| 16:30–17:18 | 浏览器隔离联调与补充离线探针 | Mock 创建/查询/撤回通过；下载、订阅模拟、OAuth、模式及套餐绑定未通过 |
-| 17:18 | 比对测试快照与进程现场 | 已记录源码哈希无变化；实施方内部任务状态未知 |
-| 17:28 | 最终复核与文档校验 | 64 个记录源文件哈希无变化，pip check 再次通过；Docker 引擎仍不可达；台账保持 UTF-8 无 BOM/LF |
-| 本轮收尾 | 退出/关闭测试页面、停止自建服务、更新督办清单 | 无真实充值或订阅变更，无业务源码改动；维持 No-Go，等待逐项交付回执 |
-| 18:16 起 | 复核“具备预发布质量基线”的声明 | 64 个基线源文件无变化、Docker 仍不可达；补充必填加密密钥及上游配置接线缺口，仅允许受控 Mock 继续测试 |
-| 21:40 | 对照 19:41 新交付与上一轮哈希 | 发现 9 个基线文件更新，进入新一轮独立验收 |
-| 21:45–21:46 | 四组回归及隔离目录构建 | 173/173，通过构建；不等同于完整业务覆盖 |
-| 本轮隔离装调 | 内存数据库、虚构数据、拦截外网的探针和浏览器检查 | 确认多项原问题修复；仍复现 SUP-02/05/06/11 残留 |
-| 22:09–22:10 | 快照、依赖、Compose 和 Docker 复核 | 66 个源文件未变化，pip check 通过；Linux Engine 29.6.1 可达、Compose 检查通过 |
-
-## 九、历史隔离测试验收（2026-09-18 21:40 轮次）
-
-本节保留修复前证据；四类问题的当前状态以第三节及第十节为准。
-
-### 证据与边界
-
-- 证据目录：`C:\Users\www\AppData\Local\Temp\google-manager-isolated-review-20260918-0eebe04e`。本轮只修改本台账，不与 Antigravity 同改业务代码。
-- 使用 `create_app('testing')`、内存 SQLite、虚构卡密/邮箱/凭据；所有验收探针阻断外部 HTTP，调用计数为 0。为核验 live 分支而临时修改的是隔离测试进程内配置，未切换真实环境，也未联系卡密上游或 Google。
-- 浏览器使用本轮新构建、独立会话、仅 loopback 的后端；Mock 创建/查询及任务 TXT 下载 200、账单 TXT 下载 200、取消后显示关闭/恢复后显示开启均通过。随后退出登录、关闭本轮标签页、停止自建 PID 63032 并确认端口关闭，证据为 `fixture-cleanup.json`。
-- 测试命令与第四节相同，结果更新为 Python 87、Node 19、Googlemail 47、UI 20，所有退出码 0；`python-tests-utf8.log` 是重新显式设置 UTF-8 后的 Python 复核日志。独立构建未覆盖 static，三项哈希比对一致。
-- `docker compose --env-file <证据目录>\empty-compose.env config --quiet` 使用空替代文件和进程内生成的虚构密钥，未读取真实 `.env`；退出码 0，仅有 version 字段警告。`docker info` 返回 Linux/29.6.1，退出码 0。此处不是项目镜像构建或运行验收。
-
-### 仍需修复的确定性复现
-
-| 项目 | 最小复现与实际结果 | 根因定位 / 关闭条件 |
-| --- | --- | --- |
-| SUP-11：live 仍返回模拟账单 | 空任务/账单状态下，隔离 live 请求 `GET /api/recharge/tasks/invoice/download?slug=inv_slug_001` → 200；文本为 paid 且标有 MOCK，无上游调用 | `app/routes/recharge.py:274` 不按模式限制 `find_mock_invoice`；`app/services/recharge_service.py:718` 硬编码固定账单。必须移除无事实兜底并隔离 live。这里不是“伪装成无标识真实发票”，而是 live 仍走模拟分支 |
-| SUP-06：挑战绑定不完整 | challenge 请求只提供卡密、不提供套餐 → 200；随后 PRO 创建 → 201。另一用例在两个独立登录会话间更换 token 后提交已签发 challenge → 201 | `app/services/recharge_service.py:129` 接受空套餐且忽略 token 上下文；`:168` 只在 expected_plan 非空时比较。补必填、会话/凭据/续费上下文绑定和共享一次性消费 |
-| SUP-02：session state 可重复进入授权交换 | 在注册表和 session 放入同一合法 state；第一次 session 回调 → 200、注册表未清除；随后无 session 使用相同 state → 200，共调用两次 token exchange | `app/routes/api.py:53` 的 session 分支未消费注册表。Google token exchange 在本探针中为 Mock，结果只证明应用层接受重放，不证明 Google 会接受重复授权码 |
-| SUP-05：unknown 未核对回写 | 创建前已观察到 pending；模拟超时 → 502、本地 unknown；随后模拟上游查询返回 completed → API 200/completed，但数据库仍 unknown | `app/services/recharge_service.py:429` 返回上游任务但不回写。补可重入核对流程、终态持久化与恢复测试，不能仅用 notice 中“待自动核对”作为机制证据 |
-
-### 已验收范围与尚未覆盖内容
-
-- 可接受本次模式枚举/生产禁 mock、显式套餐失配、无 session 批量 OAuth 单次消费、disabled 下载门禁、普通不存在任务拒绝、前端下载参数/TXT 标签、同进程 Mock 续费回滚修复等具体成果。禁止继续把旧版 400 下载、显式套餐失配 201 等症状当作当前事实。
-- 请求前 pending 与异常 unknown 持久化、创建请求移出互斥锁已验证/核实；这不等于完成跨进程幂等和未知结果恢复。模型仍明文保存卡密/challenge，仅 task_no 唯一，不等于同一业务请求数据库级唯一；上游订单号仅记在 notice，缺少明确结构化映射；共享状态与重启恢复仍未验收。
-- 原 SUP-07 的下载参数缺陷已修。其余轮询、凭证清理和跨模式状态边界继续按计划验收；现有 `tests/frontend-ui.test.mjs` 未包含充值/账单专用用例，本轮浏览器走查补充了实际链路但不构成“全覆盖”。
-- 基础/开发/生产配置默认 disabled，测试配置仍 mock；真实部署环境的实际值未读取，因此只能确认源码默认策略，不能证明“各环境实际都为 disabled”。
-- 当前审核签认：**已验证场景部分通过；完整缺陷关闭不通过；整体 No-Go 继续成立**。下一轮先补四类失败路径的自动化回归，不必等待 Docker 或真实上游资源才修复这些本地可复现问题。
-
-## 十、直接修复交付（2026-09-19）
-
-- 本轮按“失败回归 → 最小修复 → 全套离线回归 → 隔离浏览器联调 → 静态产物同步”完成，不进行真实充值或生产发布。失败基线、修复前文件和最终日志位于 `C:\Users\www\AppData\Local\Temp\google-manager-fixes-20260918-234421`。
-- 新增 `one_time_tokens`、`recharge_operations` 旁表，不删除或改写现有任务列；上线前须备份数据库，所有 worker 使用相同稳定 SECRET_KEY 和共享数据库。旧进程内 challenge/OAuth state 不迁移，应重新签发。
-- 已同步 `static/assets/index-4e9221d8.js` 与 HTML；原生成物已备份到证据目录 `static-before-sync`。当前产物与实测临时构建逐文件哈希相同。
-- 隔离服务仅使用内存 SQLite、虚构数据和被拦截的外部充值 HTTP；测试管理员口令只取 TestingConfig。浏览器已退出登录并关闭本轮标签页，服务 PID 75384 已停止，随机端口 3872 确认不可达。
-- 204 项通过不构成全功能、覆盖率或生产安全证明。SUP-05/06/08/09/10 的剩余范围与真实授权上游仍未关闭；非测试源码默认 disabled 不变，整体维持 No-Go。
+1. 交付说明按“问题 ID → 文件 → 命令与退出码 → 结果 → 未完成项”组织，并提供可定位的提交或工作区快照。
+2. 先完成 disabled/mock/live 的模式边界、未知结果核对、跨进程幂等和回调重放测试，再申请真实上游 sandbox。
+3. 生产发布前必须完成 `python -m app.manage init-db`、数据库备份恢复、web/worker 双服务、`/health/ready`、HTTPS OAuth 回调、Nginx 代理信任和权限核查。
+4. 未取得用户明确批准前，维持 No-Go，不发布镜像，不操作真实资金、订阅或账号。

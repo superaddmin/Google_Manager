@@ -3,6 +3,7 @@ import * as config from './config.mjs';
 import { parseAccounts, loadProgress, saveProgress, appendResult } from './account-parser.mjs';
 import { loginAndChange2FA } from './google-automator.mjs';
 import { maskEmail, redactSensitiveText } from './redaction.mjs';
+import { getBrowserLaunchOptions } from './browser-runtime.mjs';
 import path from 'path';
 import fs from 'fs';
 
@@ -84,10 +85,9 @@ async function main() {
   let page = null;
 
   try {
-    context = await chromium.launchPersistentContext(userDataDir, {
+    context = await chromium.launchPersistentContext(userDataDir, getBrowserLaunchOptions({
       headless: config.HEADLESS,
       slowMo: config.SLOW_MO,
-      channel: process.env.CHROME_CHANNEL || undefined,
       viewport: { width: 1280, height: 900 },
       locale: 'zh-CN',
       timezoneId: 'Asia/Shanghai',
@@ -98,7 +98,7 @@ async function main() {
         '--lang=zh-CN',
         '--disable-dev-shm-usage',
       ],
-    });
+    }));
 
     page = await context.newPage();
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' });

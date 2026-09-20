@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app import create_app, db
+from tests.auth_helpers import login_admin
 from app.models.gmail_connection import GmailConnection
 from app.services.email_poller import GmailSyncDaemon, gmail_sync_daemon
 
@@ -10,8 +11,8 @@ class EmailPollerTestCase(unittest.TestCase):
     def setUp(self):
         self.app = create_app('testing')
         self.client = self.app.test_client()
-        with self.client.session_transaction() as session:
-            session['authenticated'] = True
+        self.client.environ_base['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'
+        login_admin(self.client)
         self.context = self.app.app_context()
         self.context.push()
         db.create_all()
@@ -72,6 +73,18 @@ class EmailPollerTestCase(unittest.TestCase):
         self.assertEqual(status['totalRuns'], 1)
         self.assertEqual(status['connectionsSynced'], 1)
         self.assertEqual(status['messagesPolled'], 1)
+
+    @patch('app.services.gmail_service.GmailService.list_messages', return_value={
+        'messages': [{'id': 'msg-audit-error'}], 'nextPageToken': None,
+    })
+    @patch('app.services.security_service.SecurityService.audit_forwarding_and_filters', return_value={
+        'hasErrors': True, 'status': 'error', 'suspiciousFiltersCount': 0,
+    })
+    def test_audit_errors_are_reported_as_failed_sync(self, mock_audit, mock_list):
+        daemon = GmailSyncDaemon()
+        result = daemon.sync_once(self.app)
+        self.assertEqual(result['failed'], 1)
+        self.assertEqual(result['connectionsSynced'], 0)
 
     def test_daemon_api_endpoints(self):
         # 1. 状态接口

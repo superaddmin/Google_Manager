@@ -11,6 +11,7 @@ class OAuthStateSafetyTestCase(unittest.TestCase):
         self.context = self.app.app_context()
         self.context.push()
         self.client = self.app.test_client()
+        self.client.environ_base['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'
         self.connection = MagicMock()
         self.connection.to_dict.return_value = {'id': 42, 'email': 'fixture@example.test'}
 

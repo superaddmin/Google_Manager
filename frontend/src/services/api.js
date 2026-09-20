@@ -1,5 +1,6 @@
 // API 调用函数
 const API_BASE = '/api';
+const DEFAULT_REQUEST_TIMEOUT_MS = 20000;
 
 // 生成盐值：时间戳减去2003，再 MD5 哈希
 const generateSalt = () => {
@@ -126,6 +127,20 @@ const createApiError = (message, status) => {
     return error;
 };
 
+const isJsonObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const createResponseError = (data, fallbackMessage, status) => {
+    const payload = isJsonObject(data) ? data : {};
+    const message = typeof payload.message === 'string' && payload.message
+        ? payload.message
+        : fallbackMessage;
+    const error = createApiError(message, status);
+    const errorCode = payload.error_code ?? payload.errorCode;
+    if (errorCode !== undefined) error.errorCode = errorCode;
+    error.response = data;
+    return error;
+};
+
 const parseJsonResponse = async (res, fallbackMessage) => {
     try {
         return await res.json();
@@ -134,33 +149,120 @@ const parseJsonResponse = async (res, fallbackMessage) => {
     }
 };
 
-const requestJson = async (url, options, fallbackMessage) => {
-    const res = await fetch(url, options);
-    const data = await parseJsonResponse(res, fallbackMessage);
-    if (!res.ok) {
-        const error = createApiError(data.message || fallbackMessage, res.status);
-        error.response = data;
-        throw error;
+const fetchWithTimeout = async (
+    url,
+    options = {},
+    fallbackMessage,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    readResponse = response => response
+) => {
+    const controller = new AbortController();
+    const upstreamSignal = options.signal;
+    let removeAbortListener;
+    let rejectInterruption;
+    const interruption = new Promise((_, reject) => {
+        rejectInterruption = reject;
+    });
+
+    const abortFromUpstream = () => {
+        const reason = upstreamSignal.reason || new DOMException('The operation was aborted.', 'AbortError');
+        rejectInterruption(reason);
+        controller.abort(reason);
+    };
+
+    if (upstreamSignal) {
+        if (upstreamSignal.aborted) {
+            abortFromUpstream();
+        } else {
+            upstreamSignal.addEventListener('abort', abortFromUpstream, { once: true });
+            removeAbortListener = () => upstreamSignal.removeEventListener('abort', abortFromUpstream);
+        }
     }
-    return data;
+
+    const timer = setTimeout(() => {
+        const error = createApiError(fallbackMessage || '请求超时，请稍后重试', 408);
+        rejectInterruption(error);
+        controller.abort(error);
+    }, timeoutMs);
+
+    try {
+        const request = (async () => {
+            const response = await fetch(url, { ...options, signal: controller.signal });
+            return await readResponse(response);
+        })();
+        return await Promise.race([request, interruption]);
+    } finally {
+        clearTimeout(timer);
+        removeAbortListener?.();
+    }
+};
+
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+const withWriteRequestHeaders = (options) => {
+    const method = String(options?.method || 'GET').toUpperCase();
+    if (!WRITE_METHODS.has(method)) return options;
+    return {
+        ...options,
+        headers: {
+            ...(options?.headers || {}),
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+    };
+};
+
+const requestJson = async (url, options, fallbackMessage) => {
+    const { timeoutMs, ...fetchOptions } = options || {};
+    return await fetchWithTimeout(
+        url,
+        withWriteRequestHeaders(fetchOptions),
+        fallbackMessage,
+        timeoutMs,
+        async res => {
+            const data = await parseJsonResponse(res, fallbackMessage);
+            if (!isJsonObject(data) || !res.ok || data.success === false) {
+                throw createResponseError(data, fallbackMessage, res.status);
+            }
+            return data;
+        }
+    );
+};
+
+// 登录页需要保留密码错误和封禁响应，但网络与响应体读取同样必须有期限。
+const requestAuthJson = async (url, options, fallbackMessage) => {
+    const { timeoutMs, ...fetchOptions } = options || {};
+    return await fetchWithTimeout(
+        url,
+        withWriteRequestHeaders(fetchOptions),
+        fallbackMessage,
+        timeoutMs,
+        async res => {
+            const data = await parseJsonResponse(res, fallbackMessage);
+            if (!isJsonObject(data)) throw createApiError(fallbackMessage, res.status);
+            return data;
+        }
+    );
 };
 
 const api = {
     // 登录验证（带盐值）
-    async login(password) {
+    async login(password, options = {}) {
         const salt = generateSalt();
-        const res = await fetch(`${API_BASE}/auth/login`, {
+        return await requestAuthJson(`${API_BASE}/auth/login`, {
+            signal: options.signal,
+            timeoutMs: options.timeoutMs,
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password, salt })
-        });
-        return await parseJsonResponse(res, '登录失败');
+        }, '登录失败');
     },
 
     // 检查封禁状态
-    async checkAuth() {
-        const res = await fetch(`${API_BASE}/auth/check`);
-        return await parseJsonResponse(res, '检查登录状态失败');
+    async checkAuth(options = {}) {
+        return await requestAuthJson(`${API_BASE}/auth/check`, {
+            signal: options.signal,
+            timeoutMs: options.timeoutMs,
+        }, '检查登录状态失败');
     },
 
     // 获取所有账号
@@ -298,9 +400,10 @@ const api = {
         return await requestJson(`${API_BASE}/gmail/connections`, undefined, '获取 Gmail 账号失败');
     },
 
-    async getGmailMessages(connectionId, query = '') {
+    async getGmailMessages(connectionId, query = '', pageToken = '') {
         const params = new URLSearchParams({ maxResults: '20' });
         if (query) params.set('q', query);
+        if (pageToken) params.set('pageToken', pageToken);
         return await requestJson(`${API_BASE}/gmail/${connectionId}/messages?${params}`, undefined, '加载 Gmail 收件箱失败');
     },
 
@@ -395,21 +498,29 @@ const api = {
     },
 
     // 充值与交付管理 API
-    async getRechargeConfig() {
-        return await requestJson(`${API_BASE}/recharge/config`, undefined, '获取充值配置失败');
+    async getRechargeConfig(options = {}) {
+        return await requestJson(`${API_BASE}/recharge/config`, {
+            signal: options.signal
+        }, '获取充值配置失败');
     },
 
-    async getRechargeAgreement() {
-        return await requestJson(`${API_BASE}/recharge/agreement`, undefined, '获取充值协议失败');
+    async getRechargeAgreement(options = {}) {
+        return await requestJson(`${API_BASE}/recharge/agreement`, {
+            signal: options.signal
+        }, '获取充值协议失败');
     },
 
-    async getRechargeAvgTime(product = 'gpt', category = 'card') {
-        return await requestJson(`${API_BASE}/recharge/stats/avg-processing-time?product=${product}&category=${category}`, undefined, '获取平均耗时失败');
+    async getRechargeAvgTime(product = 'gpt', category = 'card', options = {}) {
+        return await requestJson(`${API_BASE}/recharge/stats/avg-processing-time?product=${product}&category=${category}`, {
+            signal: options.signal
+        }, '获取平均耗时失败');
     },
 
-    async validateRedeemCode(redeemCode) {
+    async validateRedeemCode(redeemCode, options = {}) {
         return await requestJson(`${API_BASE}/recharge/redeem-codes/validate`, {
             method: 'POST',
+            signal: options.signal,
+            timeoutMs: options.timeoutMs,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ redeem_code: redeemCode })
         }, 'CDK 卡密验证失败');
@@ -440,7 +551,7 @@ const api = {
 
     async lookupRechargeTask(query, options = {}) {
         const trimmed = String(query || '').trim();
-        if (trimmed.toUpperCase().startsWith('TK-') || trimmed.toUpperCase().startsWith('TASK-')) {
+        if (trimmed.toUpperCase().startsWith('TK-')) {
             return await this.getRechargeTask(trimmed, options);
         }
         return await requestJson(`${API_BASE}/recharge/tasks/lookup`, {
@@ -451,27 +562,57 @@ const api = {
         }, '查询任务进度失败');
     },
 
-    async lookupBatchRechargeTasks(redeemCodes) {
+    async lookupBatchRechargeTasks(redeemCodes, options = {}) {
         return await requestJson(`${API_BASE}/recharge/tasks/lookup-batch`, {
             method: 'POST',
+            signal: options.signal,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ redeem_codes: redeemCodes })
         }, '批量查询任务失败');
     },
 
-    async recallRechargeTask(redeemCode, email, confirmed = true) {
+    async downloadRechargeInvoice(identifier, identifierType = 'redeem_code', options = {}) {
+        const payload = identifierType === 'slug'
+            ? { slug: identifier }
+            : { redeem_code: identifier };
+        return await fetchWithTimeout(
+            `${API_BASE}/recharge/tasks/invoice/download`,
+            withWriteRequestHeaders({
+                method: 'POST',
+                signal: options.signal,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }),
+            '下载对账凭证超时，请稍后重试',
+            options.timeoutMs,
+            async res => {
+                if (!res.ok) {
+                    let data;
+                    try {
+                        data = await res.json();
+                    } catch (error) {
+                        if (error?.name === 'AbortError') throw error;
+                    }
+                    throw createResponseError(data, '下载对账凭证失败', res.status);
+                }
+                return await res.blob();
+            }
+        );
+    },
+
+    async recallRechargeTask(redeemCode, email, confirmed = true, taskNo) {
         return await requestJson(`${API_BASE}/recharge/tasks/recall`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ redeem_code: redeemCode, email, confirmed })
+            body: JSON.stringify({ redeem_code: redeemCode, email, confirmed, task_no: taskNo })
         }, '撤回任务失败');
     },
 
-    async closeRechargeTask(redeemCode, email, confirmed = true) {
+    async closeRechargeTask(redeemCode, email, confirmed = true, taskNo) {
         return await requestJson(`${API_BASE}/recharge/tasks/close`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ redeem_code: redeemCode, email, confirmed })
+            body: JSON.stringify({ redeem_code: redeemCode, email, confirmed, task_no: taskNo })
         }, '关闭任务失败');
     },
 
@@ -501,11 +642,12 @@ const api = {
     },
 
     // 退出登录并清除服务端会话
-    async logout() {
-        const res = await fetch(`${API_BASE}/auth/logout`, {
+    async logout(options = {}) {
+        return await requestAuthJson(`${API_BASE}/auth/logout`, {
+            signal: options.signal,
+            timeoutMs: options.timeoutMs,
             method: 'POST'
-        });
-        return await parseJsonResponse(res, '退出登录失败');
+        }, '退出登录失败');
     }
 };
 

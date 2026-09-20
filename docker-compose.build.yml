@@ -1,0 +1,6 @@
+# Local build overlay only. Production uses docker-compose.yml without this file.
+services:
+  google-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile

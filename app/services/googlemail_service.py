@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import threading
@@ -21,6 +22,8 @@ PASSTHROUGH_ENVIRONMENT_KEYS = {
     'APPDATA',
     'CHROME_CHANNEL',
     'COMSPEC',
+    'FLASK_ENV',
+    'GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH',
     'HOME',
     'HTTPS_PROXY',
     'HTTP_PROXY',
@@ -247,6 +250,13 @@ class GooglemailTaskManager:
             ).start()
         return self.get_task(task_id)
 
+    def cancel_for_account(self, account_id):
+        with self._lock:
+            identifiers = [record.task_id for record in self._tasks.values()
+                           if account_id in record.account_ids_by_email.values() and record.status not in TERMINAL_STATUSES]
+        for identifier in identifiers:
+            self.cancel_task(identifier)
+
     def _serialize_accounts(self, accounts):
         if not accounts:
             raise GooglemailValidationError('至少选择一个账号')
@@ -257,6 +267,8 @@ class GooglemailTaskManager:
         account_ids_by_email = {}
         invalid_ids = []
         for account in accounts:
+            if account.status == 'locked':
+                raise GooglemailValidationError('锁定账号禁止执行自动化任务', [account.id])
             fields = [
                 str(account.email or '').strip(),
                 str(account.password or ''),
@@ -282,6 +294,7 @@ class GooglemailTaskManager:
         process = None
         exit_code = None
         process_started = False
+        process_stopped = True
         runtime_error_code = None
         synced_count = 0
         result_sync_succeeded = False
@@ -317,6 +330,7 @@ class GooglemailTaskManager:
                 encoding='utf-8',
                 errors='replace',
                 creationflags=creation_flags,
+                start_new_session=os.name != 'nt',
             )
             process_started = True
             with self._lock:
@@ -338,20 +352,28 @@ class GooglemailTaskManager:
                 for _line in process.stdout:
                     pass
             exit_code = process.wait()
+            process_stopped = process.poll() is not None
         except Exception:
             runtime_error_code = (
                 'PROCESS_RUNTIME_FAILED' if process_started else 'PROCESS_START_FAILED'
             )
             if process and process.poll() is None:
-                self._terminate_process(process)
+                process_stopped = self._terminate_process(process)
             if process:
                 try:
                     exit_code = process.wait(timeout=5)
                 except (OSError, subprocess.TimeoutExpired):
-                    pass
+                    process_stopped = False
         finally:
             if timer:
                 timer.cancel()
+
+            if not process_stopped:
+                with self._lock:
+                    record.status = 'finalizing'
+                    record.error_code = 'PROCESS_STOP_UNCONFIRMED'
+                    record.process = process
+                return
 
             with self._lock:
                 record.status = 'finalizing'
@@ -441,6 +463,7 @@ class GooglemailTaskManager:
             return 0
 
         from app import db
+        from app.models.account import Account
         from app.services.account_service import AccountService
 
         updates = []
@@ -463,10 +486,12 @@ class GooglemailTaskManager:
         with app.app_context():
             try:
                 for account_id, recovery, secret in updates:
+                    if db.session.get(Account, account_id) is None:
+                        continue
                     update_data = {'secret': secret}
                     if recovery:
                         update_data['recovery'] = recovery
-                    if not AccountService.update_account(account_id, update_data, commit=False):
+                    if not AccountService.update_account(account_id, update_data, commit=False, automation_result=True):
                         raise ValueError('Googlemail 结果对应账号不存在')
                     synced_count += 1
                 db.session.commit()
@@ -547,10 +572,11 @@ class GooglemailTaskManager:
     @staticmethod
     def _terminate_process(process):
         tree_terminated = False
-        if os.name == 'nt' and getattr(process, 'pid', None):
+        process_id = getattr(process, 'pid', None)
+        if os.name == 'nt' and isinstance(process_id, int):
             try:
                 result = subprocess.run(
-                    ['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                    ['taskkill', '/PID', str(process_id), '/T', '/F'],
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -561,13 +587,25 @@ class GooglemailTaskManager:
                 pass
 
         try:
+            if os.name != 'nt' and isinstance(process_id, int):
+                os.killpg(os.getpgid(process_id), signal.SIGTERM)
+                tree_terminated = True
             if not tree_terminated:
                 process.terminate()
             process.wait(timeout=5)
+            return process.poll() is not None
         except subprocess.TimeoutExpired:
-            process.kill()
+            try:
+                if os.name != 'nt' and isinstance(process_id, int):
+                    os.killpg(os.getpgid(process_id), signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                return process.poll() is not None
+            return process.poll() is not None
         except OSError:
-            pass
+            return process.poll() is not None
 
     def _prune_tasks(self):
         terminal_records = sorted(

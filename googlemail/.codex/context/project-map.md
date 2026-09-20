@@ -8,9 +8,9 @@ Googlemail 是一个 Node.js ESM + Playwright 自动化项目，用于在授权�
 
 | 领域 | 技术 |
 | --- | --- |
-| 运行时 | Node.js 20.19+ |
+| 运行时 | package 下限 Node.js 20.19+；生产浏览器运行时 Node.js 24.x |
 | 模块系统 | ESM (`type: module`, `.mjs`) |
-| 浏览器自动化 | Playwright Chromium persistent context |
+| 浏览器自动化 | Playwright 1.63.0；生产固定 Chrome for Testing 153.0.8010.52 |
 | TOTP | `otplib` 13.4.1 |
 | 密钥生成 | `generateBase32Secret()` + Node.js `crypto.randomBytes(20)` |
 | 配置 | `src/config.mjs` + 环境变量 |
@@ -18,7 +18,7 @@ Googlemail 是一个 Node.js ESM + Playwright 自动化项目，用于在授权�
 
 ## 核心依赖
 
-- `playwright`：浏览器自动化、Chromium 控制、截图、持久化上下文。
+- `playwright` 1.63.0：浏览器自动化、Chromium 控制、截图、持久化上下文。生产环境通过受控绝对路径选择 Chrome for Testing 153.0.8010.52。
 - `otplib`：使用 v13 同步 API 与默认 Base32 解码路径生成/验证 TOTP。
 - Node 内置：`fs`、`path`、`crypto`。
 
@@ -50,6 +50,14 @@ Googlemail 是一个 Node.js ESM + Playwright 自动化项目，用于在授权�
 - 环境变量：`HEADLESS`、`SLOW_MO`、`ACCOUNT_DELAY`、`RECOVERY_EMAIL_POOL`、`ACCOUNTS_PER_RECOVERY`。
 - 浏览器 profile：`browser-data/`。
 
+### `src/browser-runtime.mjs`
+
+- 统一生成 `chromium.launch()` 与 `chromium.launchPersistentContext()` 的浏览器启动参数。
+- 导出 `EXPECTED_CHROME_VERSION`、`getBrowserLaunchOptions()`、`assertExpectedChromeVersion()` 与启动检查清理函数 `cleanupBrowserStartup()`。
+- `FLASK_ENV=production` 时要求 `GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH` 为绝对路径；缺失或与 `CHROME_CHANNEL` 同时设置时拒绝启动。
+- 强制 `chromiumSandbox: true`，拒绝调用方覆盖浏览器路径、channel、sandbox 或传入 `--no-sandbox`/`--disable-setuid-sandbox`。
+- 非生产开发环境未固定路径时仍可使用 Playwright 捆绑浏览器，但该回退不构成生产安全验收证据。
+
 ### `src/account-parser.mjs`
 
 - 每行必须有 4 段：`email----password----recoveryEmail----oldSecret`。
@@ -77,13 +85,21 @@ Googlemail 是一个 Node.js ESM + Playwright 自动化项目，用于在授权�
 ### `src/main.mjs`
 
 - 批量入口，负责运行日志、进度、结果与浏览器上下文。
-- `PROXY`、`CHROME_CHANNEL` 仅在 main 中生效。
+- 通过共享浏览器运行时启动持久化上下文；支持 `PROXY`，非生产环境可选 `CHROME_CHANNEL`。
+- 生产环境必须使用 `GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH`，且不得同时设置 `CHROME_CHANNEL`。
 - 风险点：`output/result.txt` 包含密码与新 TOTP 密钥。
 
 ### `src/test-login.mjs`
 
 - 单账号调试入口，固定 headed、slowMo 300，执行真实流程后保持浏览器打开。
+- 使用共享浏览器运行时；生产模式同样要求固定浏览器绝对路径并启用 sandbox。
 - 风险点：不是普通单元测试，会触发真实账号登录/修改。
+
+### `src/batch-oauth-worker.mjs`
+
+- 由后端任务管理器启动的批量 OAuth worker，使用 `chromium.launch()` 并为每个账号创建独立 context。
+- 使用共享浏览器运行时，生产模式要求固定浏览器绝对路径；不允许通过启动参数关闭 Chromium sandbox。
+- 风险点：任务文件、结果与浏览器页面均涉及授权账号和 OAuth 状态，不得作为普通本地 smoke 执行。
 
 ### `src/verify-2fa.mjs`
 
@@ -92,8 +108,9 @@ Googlemail 是一个 Node.js ESM + Playwright 自动化项目，用于在授权�
 
 ### `src/startup-check.mjs`
 
-- 启动无头 Chromium 并加载本地 `data:` 页面。
-- 不读取账号文件、不使用持久化 profile、不访问 Google 页面。
+- 分别覆盖 `chromium.launch()` 与临时目录中的 `chromium.launchPersistentContext()`，仅加载本地页面。
+- 校验 JavaScript、`zh-CN` locale、内存截图和资源清理；生产模式还精确校验浏览器版本为 `153.0.8010.52`。
+- 不读取账号文件、不复用业务 profile、不访问 Google 页面；临时 profile 在退出时清理。
 
 ## 敏感路径
 
@@ -109,6 +126,7 @@ Googlemail 是一个 Node.js ESM + Playwright 自动化项目，用于在授权�
 
 ```powershell
 node --check src/config.mjs
+node --check src/browser-runtime.mjs
 node --check src/account-parser.mjs
 node --check src/redaction.mjs
 node --check src/totp.mjs
@@ -117,4 +135,7 @@ node --check src/main.mjs
 node --check src/test-login.mjs
 node --check src/verify-2fa.mjs
 node --check src/startup-check.mjs
+node --check src/batch-oauth-worker.mjs
 ```
+
+浏览器制品来源、版本依据和仍待完成的最终镜像动态验收见[浏览器运行时安全基线](../../../docs/browser-security-baseline-2026-09-20.md)。当前实现变更不等于生产浏览器已验收通过。

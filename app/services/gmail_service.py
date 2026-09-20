@@ -120,6 +120,9 @@ class GmailService:
     @classmethod
     def _service(cls, connection):
         from google.oauth2.credentials import Credentials
+        from app.models.account import Account
+        if Account.query.filter_by(email=connection.email, status='locked').first():
+            raise GmailServiceError('锁定账号禁止访问 Gmail')
         credentials = Credentials.from_authorized_user_info(cls._decrypt(connection.token_data), GMAIL_SCOPES)
         if credentials.expired and credentials.refresh_token:
             from google.auth.transport.requests import Request
@@ -180,7 +183,8 @@ class GmailService:
             watch = GmailWatch(connection_id=connection.id, topic_name=topic_name)
             db.session.add(watch)
         watch.topic_name = topic_name
-        watch.history_id = str(response.get('historyId')) if response.get('historyId') else None
+        if not watch.history_id:
+            watch.history_id = str(response.get('historyId')) if response.get('historyId') else None
         watch.expiration_at = expiration_at
         watch.active = True
         db.session.commit()
@@ -194,37 +198,68 @@ class GmailService:
         watch = GmailWatch.query.filter_by(connection_id=connection.id, active=True).first()
         if not watch:
             return {'connectionId': connection.id, 'messageIds': [], 'ignored': True}
-
+        try:
+            notified = int(history_id)
+            previous = int(watch.history_id or 0)
+        except (ValueError, TypeError) as error:
+            raise GmailServiceError('无效的 Gmail 历史编号') from error
+        if notified <= previous:
+            return {'connectionId': connection.id, 'messageIds': [], 'ignored': True}
+        starting_cursor = watch.history_id
         message_ids = []
-        if watch.history_id and str(history_id) != watch.history_id:
-            response = cls._service(connection).users().history().list(
-                userId='me',
-                startHistoryId=watch.history_id,
-                historyTypes=['messageAdded', 'labelAdded', 'labelRemoved'],
-            ).execute()
-            for history_item in response.get('history', []):
-                for message_added in history_item.get('messagesAdded', []):
-                    message = message_added.get('message', {})
-                    if message.get('id'):
-                        message_ids.append(message['id'])
-        watch.history_id = str(history_id)
-        watch.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        db.session.commit()
+        page_token = None
+        seen_tokens = set()
+        full_sync = not starting_cursor
+        final_cursor = str(history_id)
+        while True:
+            try:
+                if full_sync:
+                    response = cls._service(connection).users().messages().list(
+                        userId='me', labelIds=['INBOX'], maxResults=100, pageToken=page_token,
+                    ).execute()
+                    message_ids.extend(item['id'] for item in response.get('messages', []))
+                else:
+                    arguments = {'userId': 'me', 'startHistoryId': starting_cursor,
+                                 'historyTypes': ['messageAdded', 'labelAdded', 'labelRemoved']}
+                    if page_token:
+                        arguments['pageToken'] = page_token
+                    response = cls._service(connection).users().history().list(**arguments).execute()
+                    for item in response.get('history', []):
+                        for kind in ('messagesAdded', 'labelsAdded', 'labelsRemoved'):
+                            message_ids.extend(event['message']['id'] for event in item.get(kind, [])
+                                               if event.get('message', {}).get('id'))
+                    final_cursor = str(max(int(response.get('historyId') or history_id), notified))
+            except Exception as error:
+                if not full_sync and getattr(getattr(error, 'resp', None), 'status', None) == 404:
+                    full_sync = True
+                    page_token = None
+                    seen_tokens.clear()
+                    message_ids.clear()
+                    continue
+                raise
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+            if page_token in seen_tokens:
+                raise GmailServiceError('Gmail 分页令牌重复，游标未推进')
+            seen_tokens.add(page_token)
 
-        summary = None
-        if message_ids:
-            from app.services.gmail_rule_service import GmailRuleService
-            summary = GmailRuleService.run_rules(
-                connection,
-                message_ids=list(dict.fromkeys(message_ids)),
-                max_messages=100,
-            )
-        return {
-            'connectionId': connection.id,
-            'messageIds': list(dict.fromkeys(message_ids)),
-            'ruleSummary': summary,
-            'ignored': False,
-        }
+        from app.services.gmail_rule_service import GmailRuleService
+        unique_ids = list(dict.fromkeys(message_ids))
+        summary = {'matched': 0, 'succeeded': 0, 'pendingConfirmation': 0, 'failed': 0}
+        for offset in range(0, len(unique_ids), 100):
+            result = GmailRuleService.run_rules(connection, message_ids=unique_ids[offset:offset + 100], max_messages=100)
+            for field in summary:
+                summary[field] += result.get(field, 0)
+            if result.get('failed'):
+                raise GmailServiceError('邮件规则执行失败，等待重试，游标未推进')
+        GmailWatch.query.filter_by(id=watch.id, history_id=starting_cursor).update(
+            {'history_id': final_cursor, 'updated_at': datetime.now(timezone.utc).replace(tzinfo=None)},
+            synchronize_session=False,
+        )
+        db.session.commit()
+        return {'connectionId': connection.id, 'messageIds': unique_ids,
+                'ruleSummary': summary, 'ignored': False}
 
     @staticmethod
     def _message_dict(message):

@@ -4,6 +4,12 @@
 """
 from app import db
 from datetime import datetime
+from sqlalchemy import event
+
+from app.services.field_encryption import decrypt_value, encrypt_value, is_encrypted
+
+
+SENSITIVE_HISTORY_FIELDS = {'password', 'secret', 'recovery'}
 
 
 class AccountHistory(db.Model):
@@ -25,12 +31,14 @@ class AccountHistory(db.Model):
     
     def to_dict(self):
         """转换为字典"""
+        old_value = decrypt_value(self.old_value) if self.field_name in SENSITIVE_HISTORY_FIELDS else self.old_value
+        new_value = decrypt_value(self.new_value) if self.field_name in SENSITIVE_HISTORY_FIELDS else self.new_value
         return {
             'id': self.id,
             'accountId': self.account_id,
             'fieldName': self.field_name,
-            'oldValue': self.old_value,
-            'newValue': self.new_value,
+            'oldValue': '[已隐藏]' if self.field_name in {'password', 'secret'} else old_value,
+            'newValue': '[已隐藏]' if self.field_name in {'password', 'secret'} else new_value,
             'changedAt': self.changed_at.strftime('%Y-%m-%d %H:%M:%S') if self.changed_at else None
         }
     
@@ -47,3 +55,14 @@ class AccountHistory(db.Model):
             'gmail_oauth': 'Gmail授权'
         }
         return names.get(field_name, field_name)
+
+
+@event.listens_for(AccountHistory, 'before_insert')
+@event.listens_for(AccountHistory, 'before_update')
+def protect_sensitive_history_values(mapper, connection, target):
+    if target.field_name not in SENSITIVE_HISTORY_FIELDS:
+        return
+    if not is_encrypted(target.old_value):
+        target.old_value = encrypt_value(target.old_value)
+    if not is_encrypted(target.new_value):
+        target.new_value = encrypt_value(target.new_value)

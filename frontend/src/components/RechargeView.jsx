@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
     CreditCard,
     CheckCircle2,
@@ -13,25 +13,172 @@ import {
     Copy,
     Check,
     X,
-    Users,
     AlertCircle,
     Download,
     Power,
     HelpCircle,
     Layers,
-    ListFilter
+    ListFilter,
+    Eye,
+    EyeOff
 } from 'lucide-react';
 import api from '../services/api';
 
-const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
+const RECHARGE_POLL_MAX_DURATION_MS = 30 * 60 * 1000;
+// Keep client-side validation aligned with the backend's Unicode \w-based rule.
+const EMAIL_PATTERN = /^[\p{L}\p{N}_.-]+@[\p{L}\p{N}_.-]+\.[\p{L}\p{N}_]+$/u;
+const AGREEMENT_ALLOWED_TAGS = new Set([
+    'a', 'article', 'b', 'blockquote', 'br', 'code', 'del', 'div', 'em', 'h1', 'h2', 'h3',
+    'h4', 'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 'section', 'span', 'strong',
+    'table', 'tbody', 'td', 'th', 'thead', 'tr', 'u', 'ul'
+]);
+const AGREEMENT_DROPPED_TAGS = new Set([
+    'audio', 'base', 'button', 'canvas', 'embed', 'form', 'iframe', 'input', 'link', 'math',
+    'meta', 'object', 'option', 'script', 'select', 'style', 'svg', 'template', 'textarea', 'video'
+]);
+const AGREEMENT_ALLOWED_CLASSES = new Set([
+    'agreement-content', 'dark:text-emerald-400', 'font-bold', 'space-y-3', 'text-base',
+    'text-emerald-600', 'text-sm'
+]);
+const AGREEMENT_VOID_TAGS = new Set(['br', 'hr']);
+
+const getSafeAgreementHref = (rawHref) => {
+    const href = String(rawHref || '').trim();
+    if (!href) return '';
+    try {
+        const parsed = new URL(href, window.location.origin);
+        if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) return '';
+        return href;
+    } catch {
+        return '';
+    }
+};
+
+const renderAgreementNode = (node, key) => {
+    if (node.nodeType === 3) return node.textContent;
+    if (node.nodeType !== 1) return null;
+
+    const tagName = node.tagName.toLowerCase();
+    if (AGREEMENT_DROPPED_TAGS.has(tagName)) return null;
+    const children = Array.from(node.childNodes).map((child, index) => (
+        renderAgreementNode(child, `${key}-${index}`)
+    ));
+    if (!AGREEMENT_ALLOWED_TAGS.has(tagName)) {
+        return <React.Fragment key={key}>{children}</React.Fragment>;
+    }
+
+    const props = { key };
+    const safeClasses = String(node.getAttribute('class') || '')
+        .split(/\s+/)
+        .filter(className => AGREEMENT_ALLOWED_CLASSES.has(className));
+    if (safeClasses.length > 0) props.className = safeClasses.join(' ');
+    if (tagName === 'a') {
+        const href = getSafeAgreementHref(node.getAttribute('href'));
+        if (!href) return <span key={key}>{children}</span>;
+        props.href = href;
+        props.rel = 'noopener noreferrer';
+        if (node.getAttribute('target') === '_blank') props.target = '_blank';
+        const title = node.getAttribute('title');
+        if (title) props.title = title;
+    }
+    if (['td', 'th'].includes(tagName)) {
+        const colSpan = Number.parseInt(node.getAttribute('colspan'), 10);
+        const rowSpan = Number.parseInt(node.getAttribute('rowspan'), 10);
+        if (Number.isInteger(colSpan) && colSpan > 0 && colSpan <= 100) props.colSpan = colSpan;
+        if (Number.isInteger(rowSpan) && rowSpan > 0 && rowSpan <= 100) props.rowSpan = rowSpan;
+    }
+    if (AGREEMENT_VOID_TAGS.has(tagName)) return React.createElement(tagName, props);
+    return React.createElement(tagName, props, children);
+};
+
+const SafeAgreementContent = ({ html, className }) => {
+    if (typeof DOMParser === 'undefined') return <div className={className}>{html}</div>;
+    const documentNode = new DOMParser().parseFromString(String(html || ''), 'text/html');
+    const content = Array.from(documentNode.body.childNodes).map((node, index) => (
+        renderAgreementNode(node, `agreement-${index}`)
+    ));
+    return <div className={className}>{content}</div>;
+};
+
+const SecretVisibilityButton = ({ visible, onToggle, label, disabled = false, className = '' }) => (
+    <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled}
+        aria-label={`${visible ? '隐藏' : '显示'}${label}`}
+        aria-pressed={visible}
+        title={`${visible ? '隐藏' : '显示'}${label}`}
+        className={`inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:text-emerald-500 disabled:cursor-not-allowed disabled:opacity-40 ${className}`}
+    >
+        {visible ? <EyeOff size={16} /> : <Eye size={16} />}
+    </button>
+);
+
+const maskMultilineSecret = (value) => Array.from(String(value || ''), character => (
+    character === '\n' || character === '\r' ? character : '•'
+)).join('');
+
+const MaskedTextarea = ({
+    revealed,
+    maskLabel,
+    maskClassName,
+    value,
+    className,
+    style,
+    onScroll,
+    ...textareaProps
+}) => {
+    const maskRef = useRef(null);
+    const masked = !revealed && Boolean(value);
+    const handleScroll = (event) => {
+        if (maskRef.current) {
+            maskRef.current.scrollTop = event.currentTarget.scrollTop;
+            maskRef.current.scrollLeft = event.currentTarget.scrollLeft;
+        }
+        onScroll?.(event);
+    };
+
+    return (
+        <div className="relative">
+            <textarea
+                {...textareaProps}
+                value={value}
+                onScroll={handleScroll}
+                className={`${className || ''} ${masked ? 'selection:text-transparent' : ''}`}
+                style={masked ? {
+                    ...style,
+                    color: 'transparent',
+                    caretColor: '#10b981',
+                    WebkitTextFillColor: 'transparent',
+                } : style}
+            />
+            {masked && (
+                <div
+                    ref={maskRef}
+                    aria-hidden="true"
+                    data-sensitive-mask={maskLabel}
+                    className={`pointer-events-none absolute inset-px overflow-hidden whitespace-pre-wrap break-all ${maskClassName}`}
+                >
+                    {maskMultilineSecret(value)}
+                </div>
+            )}
+        </div>
+    );
+};
+
+const RechargeView = ({ darkMode, showNotification }) => {
     const [activeTab, setActiveTab] = useState('submit'); // 'submit' | 'lookup' | 'billing' | 'guide'
 
     // --- 提交表单状态 ---
     const [cdkInput, setCdkInput] = useState('');
     const [validatingCdk, setValidatingCdk] = useState(false);
     const [cdkInfo, setCdkInfo] = useState(null); // CDK 校验结果
+    const cdkValidationRequestId = useRef(0);
+    const cdkValidationController = useRef(null);
     const [tokenInput, setTokenInput] = useState('');
     const [accountEmail, setAccountEmail] = useState('');
+    const accountEmailRef = useRef('');
+    const autoFilledEmailRef = useRef('');
     const [isRenewal, setIsRenewal] = useState(false);
     const [agreeTerms, setAgreeTerms] = useState(false);
     const [emailConfirmed, setEmailConfirmed] = useState(false);
@@ -39,14 +186,12 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
     const [createdTask, setCreatedTask] = useState(null);
     const [parsedSessionInfo, setParsedSessionInfo] = useState(null);
     const [copiedKey, setCopiedKey] = useState('');
+    const [revealedSecrets, setRevealedSecrets] = useState({});
 
     // 平均耗时
     const [systemConfig, setSystemConfig] = useState(null);
     const [avgTimes, setAvgTimes] = useState([]);
-
-    // 账号库选择弹窗
-    const [showAccountPicker, setShowAccountPicker] = useState(false);
-    const [accountSearch, setAccountSearch] = useState('');
+    const [metadataError, setMetadataError] = useState('');
 
     // 协议弹窗
     const [showAgreementModal, setShowAgreementModal] = useState(false);
@@ -57,14 +202,19 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
     const [lookupCdk, setLookupCdk] = useState('');
     const [lookupLoading, setLookupLoading] = useState(false);
     const [singleTaskResult, setSingleTaskResult] = useState(null);
+    const [singleTaskQuery, setSingleTaskQuery] = useState('');
+    const [invoiceDownloading, setInvoiceDownloading] = useState(false);
     const lookupRequestId = useRef(0);
     const lookupController = useRef(null);
     const [batchCdkText, setBatchCdkText] = useState('');
     const [batchResults, setBatchResults] = useState([]);
+    const batchLookupRequestId = useRef(0);
+    const batchLookupController = useRef(null);
 
     // 操作确认弹窗 (撤回/关闭)
-    const [actionModal, setActionModal] = useState(null); // { type: 'recall' | 'close', task: ... }
+    const [actionModal, setActionModal] = useState(null); // { type, task, redeemCode, email }
     const [actionLoading, setActionLoading] = useState(false);
+    const actionRequestInFlight = useRef(false);
 
     // --- 账单工作台状态 ---
     const [billingToken, setBillingToken] = useState('');
@@ -74,27 +224,63 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
     const billingRequestId = useRef(0);
     const billingController = useRef(null);
 
+    const features = systemConfig?.features || {};
+    const renewalEnabled = features.renewal_enabled !== false;
+    // Live capability must be explicit: the backend rejects renewal unless the
+    // validated CDK response contains is_renewal_supported=true.
+    const renewalSupported = renewalEnabled && cdkInfo?.is_renewal_supported === true;
+    const batchLookupEnabled = features.batch_lookup_enabled !== false;
+
+    const toggleSecretVisibility = (field) => {
+        setRevealedSecrets(current => ({ ...current, [field]: !current[field] }));
+    };
+
     // 加载基础数据
     useEffect(() => {
-        loadMetadata();
+        const controller = new AbortController();
+        loadMetadata(controller.signal);
+        return () => {
+            controller.abort();
+            cdkValidationRequestId.current += 1;
+            cdkValidationController.current?.abort();
+        };
     }, []);
 
-    const loadMetadata = async () => {
+    const loadMetadata = async (signal) => {
         try {
-            const configRes = await api.getRechargeConfig();
+            const configRes = await api.getRechargeConfig({ signal });
+            if (signal?.aborted) return;
             if (configRes?.data) setSystemConfig(configRes.data);
             if (configRes?.data?.mode === 'disabled') return;
-            const times = await api.getRechargeAvgTime();
-            if (times?.data) setAvgTimes(times.data);
-            const agreement = await api.getRechargeAgreement();
-            if (agreement?.data?.content) setAgreementContent(agreement.data.content);
+            const [timesResult, agreementResult] = await Promise.allSettled([
+                api.getRechargeAvgTime('gpt', 'card', { signal }),
+                api.getRechargeAgreement({ signal }),
+            ]);
+            if (signal?.aborted) return;
+            if (timesResult.status === 'fulfilled') {
+                if (timesResult.value?.data) setAvgTimes(timesResult.value.data);
+            } else {
+                console.error('加载平均耗时失败:', timesResult.reason);
+            }
+            if (agreementResult.status === 'fulfilled' && agreementResult.value?.data?.content) {
+                setAgreementContent(agreementResult.value.data.content);
+                setMetadataError('');
+            } else {
+                setMetadataError(
+                    agreementResult.status === 'rejected'
+                        ? '充值服务协议加载失败，请刷新后重试'
+                        : '服务协议内容为空，请刷新后重试',
+                );
+            }
         } catch (err) {
+            if (signal?.aborted) return;
             console.error('加载元数据失败:', err);
+            setMetadataError('充值服务协议加载失败，请刷新后重试');
         }
     };
 
     // 自动轮询查询中的活跃任务 (pending/processing)
-    const lookupKey = singleTaskResult?.task_no || singleTaskResult?.redeem_code;
+    const lookupKey = singleTaskResult?.task_no;
     const lookupStatus = singleTaskResult?.status;
     useEffect(() => {
         if (activeTab !== 'lookup' || lookupMode !== 'single' || !lookupKey ||
@@ -103,8 +289,15 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
         let timer;
         let controller;
         let failures = 0;
+        const pollStartedAt = Date.now();
         const requestId = lookupRequestId.current;
         const poll = async () => {
+            if (Date.now() - pollStartedAt >= RECHARGE_POLL_MAX_DURATION_MS) {
+                if (!canceled) {
+                    showNotification?.('任务核对已超过 30 分钟，请稍后手动查询或联系客服。', 'error');
+                }
+                return;
+            }
             controller = new AbortController();
             let nextStatus = lookupStatus;
             try {
@@ -123,7 +316,12 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                 }
             }
             if (!canceled && ['pending', 'processing', 'unknown'].includes(nextStatus)) {
-                timer = setTimeout(poll, Math.min(5000 * 2 ** failures, 30000));
+                const delay = Math.min(5000 * 2 ** failures, 30000);
+                if (Date.now() - pollStartedAt + delay >= RECHARGE_POLL_MAX_DURATION_MS) {
+                    showNotification?.('任务核对已超过 30 分钟，请稍后手动查询或联系客服。', 'error');
+                    return;
+                }
+                timer = setTimeout(poll, delay);
             }
         };
         timer = setTimeout(poll, 5000);
@@ -135,13 +333,31 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
     }, [activeTab, lookupMode, lookupKey, lookupStatus]);
 
     useEffect(() => {
-        setLookupLoading(false);
-        if (activeTab !== 'lookup' || lookupMode !== 'single') return;
         return () => {
-            lookupRequestId.current += 1;
-            lookupController.current?.abort();
+            if (activeTab === 'lookup' && lookupMode === 'single') {
+                lookupRequestId.current += 1;
+                lookupController.current?.abort();
+                setLookupLoading(false);
+            }
+            if (activeTab === 'lookup' && lookupMode === 'batch') {
+                batchLookupRequestId.current += 1;
+                batchLookupController.current?.abort();
+                setLookupLoading(false);
+            }
         };
     }, [activeTab, lookupMode]);
+
+    useEffect(() => {
+        if (!batchLookupEnabled && lookupMode === 'batch') setLookupMode('single');
+    }, [batchLookupEnabled, lookupMode]);
+
+    useEffect(() => {
+        if (!renewalSupported && isRenewal) setIsRenewal(false);
+    }, [renewalSupported, isRenewal]);
+
+    useEffect(() => {
+        setRevealedSecrets({});
+    }, [activeTab]);
 
     useEffect(() => {
         setBillingResult(null);
@@ -156,12 +372,29 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
     }, [activeTab, billingToken]);
 
     // 复制剪贴板
-    const copyToClipboard = (text, key) => {
+    const copyToClipboard = async (text, key) => {
         if (!text) return;
-        navigator.clipboard.writeText(text);
-        setCopiedKey(key);
-        setTimeout(() => setCopiedKey(''), 2000);
-        showNotification?.('已复制到剪贴板', 'success');
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.select();
+                const copied = document.execCommand('copy');
+                textarea.remove();
+                if (!copied) throw new Error('clipboard unavailable');
+            }
+            setCopiedKey(key);
+            setTimeout(() => setCopiedKey(''), 2000);
+            showNotification?.('已复制到剪贴板', 'success');
+        } catch {
+            showNotification?.('复制失败，请手动复制', 'error');
+        }
     };
 
     // 1. 验证 CDK 卡密
@@ -171,31 +404,58 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
             showNotification?.('请输入 CDK 卡密', 'error');
             return;
         }
+        const requestId = ++cdkValidationRequestId.current;
+        cdkValidationController.current?.abort();
+        const controller = new AbortController();
+        cdkValidationController.current = controller;
         setValidatingCdk(true);
         try {
-            const res = await api.validateRedeemCode(code);
+            const res = await api.validateRedeemCode(code, { signal: controller.signal });
+            if (controller.signal.aborted || requestId !== cdkValidationRequestId.current || cdkInput.trim() !== code) return;
             if (res.success && res.data) {
                 setCdkInfo(res.data);
                 showNotification?.(`CDK 验证成功：${res.data.plan_name || res.data.plan_type}`, 'success');
-                if (res.data.bound_email) {
-                    setAccountEmail(res.data.bound_email);
-                    setEmailConfirmed(false);
-                }
             } else {
                 showNotification?.(res.message || 'CDK 验证失败', 'error');
             }
         } catch (err) {
-            showNotification?.(err.message || 'CDK 验证失败，请检查卡密有效性', 'error');
+            if (!controller.signal.aborted && requestId === cdkValidationRequestId.current) {
+                showNotification?.(err.message || 'CDK 验证失败，请检查卡密有效性', 'error');
+            }
         } finally {
-            setValidatingCdk(false);
+            if (requestId === cdkValidationRequestId.current) setValidatingCdk(false);
         }
     };
 
     // 智能解析 Token / Session JSON
     useEffect(() => {
         const input = tokenInput.trim();
+        const previousAutoEmail = autoFilledEmailRef.current;
+        const currentEmail = accountEmailRef.current;
+        const updateParsedEmail = (parsedEmail) => {
+            const nextEmail = String(parsedEmail || '').trim();
+            const mayReplace = !currentEmail || (previousAutoEmail && currentEmail === previousAutoEmail);
+            if (mayReplace) {
+                setAccountEmail(nextEmail);
+                accountEmailRef.current = nextEmail;
+                autoFilledEmailRef.current = nextEmail;
+            } else {
+                autoFilledEmailRef.current = '';
+            }
+            // Any credential change requires a fresh ownership confirmation.
+            setEmailConfirmed(false);
+        };
+        const clearAutoFilledEmail = () => {
+            if (previousAutoEmail && currentEmail === previousAutoEmail) {
+                setAccountEmail('');
+                accountEmailRef.current = '';
+            }
+            autoFilledEmailRef.current = '';
+            setEmailConfirmed(false);
+        };
         if (!input) {
             setParsedSessionInfo(null);
+            clearAutoFilledEmail();
             return;
         }
 
@@ -215,10 +475,8 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                     valid: hasAccessToken && Boolean(email)
                 });
 
-                if (email && !accountEmail) {
-                    setAccountEmail(email);
-                    setEmailConfirmed(false);
-                }
+                if (email) updateParsedEmail(email);
+                else clearAutoFilledEmail();
                 return;
             } catch {
                 // 非合法 JSON
@@ -235,15 +493,13 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                     sk: parts[1].trim(),
                     valid: true
                 });
-                if (!accountEmail) {
-                    setAccountEmail(parts[0].trim());
-                    setEmailConfirmed(false);
-                }
+                updateParsedEmail(parts[0].trim());
                 return;
             }
         }
 
         setParsedSessionInfo(null);
+        clearAutoFilledEmail();
     }, [tokenInput]);
 
     // 提交充值任务
@@ -252,11 +508,20 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
             showNotification?.('请先验证有效的 CDK 卡密', 'error');
             return;
         }
+        if (!agreementContent) {
+            showNotification?.(metadataError || '服务协议尚未加载，请刷新后重试', 'error');
+            return;
+        }
+        const submitCdk = cdkInput.trim();
+        const submitToken = tokenInput.trim();
+        const submitPlan = cdkInfo.plan_type;
+        const submitEmail = accountEmail.trim();
+        const submitRenewal = renewalSupported ? isRenewal : false;
         if (!tokenInput.trim() && cdkInfo.plan_type !== 'FINISHED') {
             showNotification?.('请提供充值凭证或 Session JSON', 'error');
             return;
         }
-        if (!accountEmail.trim() || !accountEmail.includes('@')) {
+        if (!EMAIL_PATTERN.test(submitEmail)) {
             showNotification?.('请提供有效的账号接收邮箱', 'error');
             return;
         }
@@ -272,33 +537,40 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
         setSubmittingTask(true);
         try {
             // 1. 获取防刷 challenge
-            const challengeRes = await api.getSubmissionChallenge(cdkInput.trim(), {
-                token_input: tokenInput.trim(),
-                plan_type: cdkInfo.plan_type,
-                is_renewal: isRenewal
+            const challengeRes = await api.getSubmissionChallenge(submitCdk, {
+                token_input: submitToken,
+                plan_type: submitPlan,
+                is_renewal: submitRenewal
             });
             const challengeToken = challengeRes?.data?.challenge_token;
+            if (!challengeRes?.success || !challengeToken) {
+                throw new Error(challengeRes?.message || '获取校验令牌失败，请重试');
+            }
 
             // 2. 提交任务
             const taskPayload = {
-                redeem_code: cdkInput.trim(),
-                token_input: tokenInput.trim(),
-                plan_type: cdkInfo.plan_type,
-                account_email: accountEmail.trim(),
+                redeem_code: submitCdk,
+                token_input: submitToken,
+                plan_type: submitPlan,
+                account_email: submitEmail,
                 agreement_accepted: true,
                 email_verified: true,
                 challenge_token: challengeToken,
-                is_renewal: isRenewal,
+                is_renewal: submitRenewal,
                 acknowledge_non_free: true,
                 notify_channel: 'site',
-                notify_email: accountEmail.trim()
+                notify_email: submitEmail
             };
 
             const res = await api.createRechargeTask(taskPayload);
             if (res.success && res.data) {
                 setCreatedTask(res.data);
                 setTokenInput('');
+                setRevealedSecrets(current => ({ ...current, credential: false }));
                 setParsedSessionInfo(null);
+                setAccountEmail('');
+                accountEmailRef.current = '';
+                autoFilledEmailRef.current = '';
                 setEmailConfirmed(false);
                 setAgreeTerms(false);
                 showNotification?.(`任务已创建！任务编号：${res.data.task_no}`, 'success');
@@ -306,7 +578,12 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                 showNotification?.(res.message || '提交任务失败', 'error');
             }
         } catch (err) {
-            showNotification?.(err.message || '提交任务失败，请检查数据契约', 'error');
+            showNotification?.(
+                err.status === 408 || err.status === 502
+                    ? '提交结果暂未确认，请先查询任务状态，勿重复提交。'
+                    : (err.message || '提交任务失败，请检查数据契约'),
+                'error',
+            );
         } finally {
             setSubmittingTask(false);
         }
@@ -321,9 +598,12 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
         }
         const requestId = ++lookupRequestId.current;
         lookupController.current?.abort();
+        batchLookupRequestId.current += 1;
+        batchLookupController.current?.abort();
         const controller = new AbortController();
         lookupController.current = controller;
         setSingleTaskResult(null);
+        setSingleTaskQuery(code);
         setLookupLoading(true);
         try {
             const res = await api.lookupRechargeTask(code, { signal: controller.signal });
@@ -364,9 +644,16 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
             return;
         }
 
+        const requestId = ++batchLookupRequestId.current;
+        batchLookupController.current?.abort();
+        lookupRequestId.current += 1;
+        lookupController.current?.abort();
+        const controller = new AbortController();
+        batchLookupController.current = controller;
         setLookupLoading(true);
         try {
-            const res = await api.lookupBatchRechargeTasks(codes);
+            const res = await api.lookupBatchRechargeTasks(codes, { signal: controller.signal });
+            if (controller.signal.aborted || requestId !== batchLookupRequestId.current) return;
             if (res.success && res.data) {
                 setBatchResults(res.data);
                 showNotification?.(`批量查询完成：共 ${res.data.length} 条记录`, 'success');
@@ -374,41 +661,120 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                 showNotification?.(res.message || '批量查询失败', 'error');
             }
         } catch (err) {
-            showNotification?.(err.message || '批量查询失败', 'error');
+            if (!controller.signal.aborted && requestId === batchLookupRequestId.current) {
+                showNotification?.(err.message || '批量查询失败', 'error');
+            }
         } finally {
-            setLookupLoading(false);
+            if (requestId === batchLookupRequestId.current) setLookupLoading(false);
         }
+    };
+
+    const saveInvoiceBlob = (blob, filename) => {
+        const downloadUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        // Defer revocation until the browser has started consuming the blob.
+        window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+    };
+
+    const handleInvoiceDownload = async () => {
+        const redeemCode = singleTaskQuery.trim();
+        if (!redeemCode || /^(TK-)/i.test(redeemCode) || !singleTaskResult?.task_no) {
+            showNotification?.('请使用完整卡密查询后下载对账凭证', 'error');
+            return;
+        }
+        setInvoiceDownloading(true);
+        try {
+            const blob = await api.downloadRechargeInvoice(redeemCode);
+            saveInvoiceBlob(blob, `receipt-${singleTaskResult?.task_no || 'recharge'}.txt`);
+        } catch (err) {
+            showNotification?.(err.message || '下载对账凭证失败', 'error');
+        } finally {
+            setInvoiceDownloading(false);
+        }
+    };
+
+    const handleBillingInvoiceDownload = async (slug, invoiceId) => {
+        if (!slug) return;
+        setInvoiceDownloading(true);
+        try {
+            const blob = await api.downloadRechargeInvoice(slug, 'slug');
+            saveInvoiceBlob(blob, `receipt-${invoiceId || slug}.txt`);
+        } catch (err) {
+            showNotification?.(err.message || '下载收据失败', 'error');
+        } finally {
+            setInvoiceDownloading(false);
+        }
+    };
+
+    const openTaskAction = (type) => {
+        if (!singleTaskResult?.task_no) {
+            showNotification?.('当前查询结果缺少任务编号，无法执行操作', 'error');
+            return;
+        }
+        const queriedRedeemCode = /^(TK-)/i.test(singleTaskQuery.trim()) ? '' : singleTaskQuery.trim();
+        setRevealedSecrets(current => ({ ...current, actionCdk: false }));
+        setActionModal({
+            type,
+            task: singleTaskResult,
+            redeemCode: queriedRedeemCode,
+            email: '',
+        });
     };
 
     // 确认执行任务撤回 / 关闭操作（严格写操作二次确认）
     const handleConfirmTaskAction = async () => {
-        if (!actionModal) return;
-        const { type, task } = actionModal;
+        if (!actionModal || actionRequestInFlight.current) return;
+        const action = actionModal;
+        const { type } = action;
+        const taskNo = action.task?.task_no;
+        const redeemCode = action.redeemCode.trim();
+        const email = action.email.trim();
+        if (!taskNo) {
+            showNotification?.('当前任务缺少任务编号，请重新查询后再操作', 'error');
+            return;
+        }
+        if (!redeemCode || !EMAIL_PATTERN.test(email)) {
+            showNotification?.('请输入完整卡密和账号邮箱后再确认操作', 'error');
+            return;
+        }
+        actionRequestInFlight.current = true;
         setActionLoading(true);
         try {
+            let res;
             if (type === 'recall') {
-                const res = await api.recallRechargeTask(task.redeem_code, task.account_email, true);
+                res = await api.recallRechargeTask(redeemCode, email, true, taskNo);
                 if (res.success) {
                     showNotification?.('任务已成功撤回，可重新修改凭证后提交', 'success');
                     setSingleTaskResult(res.data);
                 }
             } else if (type === 'close') {
-                const res = await api.closeRechargeTask(task.redeem_code, task.account_email, true);
+                res = await api.closeRechargeTask(redeemCode, email, true, taskNo);
                 if (res.success) {
                     showNotification?.('任务已关闭并销毁卡密', 'success');
                     setSingleTaskResult(res.data);
                 }
             }
-            setActionModal(null);
+            if (res?.success) {
+                setActionModal(null);
+            } else {
+                showNotification?.(res?.message || '操作未完成，请重新核对任务与卡密', 'error');
+            }
         } catch (err) {
             showNotification?.(err.message || '操作失败', 'error');
         } finally {
+            actionRequestInFlight.current = false;
             setActionLoading(false);
         }
     };
 
     // 3. 账单与订阅查询
-    const handleQueryBilling = async () => {
+    const handleQueryBilling = async ({ allowDuringMutation = false } = {}) => {
+        if (billingActionLoading && !allowDuringMutation) return;
         const token = billingToken.trim();
         if (!token) {
             showNotification?.('请输入 ChatGPT Session Token 或凭证', 'error');
@@ -450,7 +816,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
             if (requestId !== billingRequestId.current) return;
             if (res.success) {
                 showNotification?.('已成功取消自动续费', 'success');
-                handleQueryBilling();
+                await handleQueryBilling({ allowDuringMutation: true });
             }
         } catch (err) {
             showNotification?.(err.message || '取消续费失败', 'error');
@@ -472,7 +838,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
             if (requestId !== billingRequestId.current) return;
             if (res.success) {
                 showNotification?.('已成功恢复自动续费', 'success');
-                handleQueryBilling();
+                await handleQueryBilling({ allowDuringMutation: true });
             }
         } catch (err) {
             showNotification?.(err.message || '恢复续费失败', 'error');
@@ -481,16 +847,6 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
         }
     };
 
-    // 过滤账号库列表
-    const filteredAccounts = useMemo(() => {
-        if (!accountSearch.trim()) return accounts;
-        const q = accountSearch.toLowerCase();
-        return accounts.filter(acc =>
-            acc.email?.toLowerCase().includes(q) ||
-            acc.remark?.toLowerCase().includes(q)
-        );
-    }, [accounts, accountSearch]);
-
     return (
         <div className="space-y-6 animate-in fade-in duration-300">
             {/* 模式禁用警告条 */}
@@ -498,6 +854,12 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                 <div className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-400 text-xs flex items-center gap-2">
                     <AlertTriangle size={16} className="flex-shrink-0" />
                     <span>充值交付功能当前在服务端未启用 (RECHARGE_MODE=disabled)，提交与写操作将被系统拦截。</span>
+                </div>
+            )}
+            {metadataError && systemConfig?.mode !== 'disabled' && (
+                <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-xs flex items-center gap-2">
+                    <AlertTriangle size={16} className="flex-shrink-0" />
+                    <span>{metadataError}</span>
                 </div>
             )}
 
@@ -512,7 +874,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                         </div>
                         <div>
                             <div className="flex items-center gap-2">
-                                <h1 className="text-xl font-bold tracking-tight">充值交付与任务中控</h1>
+                                <h1 className="text-xl font-bold tracking-tight">自助充值与订单服务</h1>
                                 <span className="text-xs px-2.5 py-0.5 rounded-full font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                                     AI Chong 666 互通
                                 </span>
@@ -533,7 +895,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                 )}
                             </div>
                             <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                                支持 CDK 智能验证、Session/Cookie 凭证解析、批量状态查询与自动续费中控
+                                使用 CDK 提交充值，查询订单进度并管理账号续费状态
                             </p>
                         </div>
                     </div>
@@ -603,7 +965,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                         <div className={`p-6 rounded-3xl border shadow-sm transition-all ${
                             darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'
                         }`}>
-                            <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center mb-4">
                                 <div className="flex items-center gap-2.5 font-bold text-base">
                                     <span className="w-6 h-6 rounded-full bg-emerald-500 text-white flex items-center justify-center text-xs">
                                         1
@@ -619,20 +981,40 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                             </div>
 
                             <div className="flex gap-3">
-                                <input
-                                    type="text"
-                                    value={cdkInput}
-                                    onChange={e => { setCdkInput(e.target.value); setCdkInfo(null); }}
-                                    placeholder="请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）"
-                                    className={`flex-1 px-4 py-3 rounded-2xl border text-sm font-mono outline-none transition-all ${
-                                        darkMode
-                                            ? 'bg-slate-900 border-slate-700 text-slate-100 focus:border-emerald-500'
-                                            : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-emerald-500'
-                                    }`}
-                                />
+                                <div className="relative flex-1">
+                                    <input
+                                        type={revealedSecrets.submitCdk ? 'text' : 'password'}
+                                        value={cdkInput}
+                                        onChange={e => {
+                                            const value = e.target.value;
+                                            cdkValidationRequestId.current += 1;
+                                            cdkValidationController.current?.abort();
+                                            setValidatingCdk(false);
+                                            setCdkInput(value);
+                                            setCdkInfo(null);
+                                            setIsRenewal(false);
+                                        }}
+                                        placeholder="请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）"
+                                        disabled={submittingTask}
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                        className={`w-full px-4 py-3 pr-12 rounded-2xl border text-sm font-mono outline-none transition-all ${
+                                            darkMode
+                                                ? 'bg-slate-900 border-slate-700 text-slate-100 focus:border-emerald-500'
+                                                : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-emerald-500'
+                                        }`}
+                                    />
+                                    <SecretVisibilityButton
+                                        visible={Boolean(revealedSecrets.submitCdk)}
+                                        onToggle={() => toggleSecretVisibility('submitCdk')}
+                                        label="CDK 卡密"
+                                        disabled={submittingTask}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2"
+                                    />
+                                </div>
                                 <button
                                     onClick={handleValidateCdk}
-                                    disabled={validatingCdk || !cdkInput.trim()}
+                                    disabled={submittingTask || validatingCdk || !cdkInput.trim()}
                                     className="px-6 py-3 rounded-2xl text-sm font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 transition-all shadow-md shadow-emerald-600/20 flex items-center gap-2 flex-shrink-0"
                                 >
                                     {validatingCdk ? <RefreshCw size={16} className="animate-spin" /> : <Zap size={16} />}
@@ -673,14 +1055,6 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                     </span>
                                     <span>录入凭证与账号</span>
                                 </div>
-
-                                <button
-                                    onClick={() => setShowAccountPicker(true)}
-                                    className="px-3.5 py-1.5 rounded-xl border text-xs font-semibold text-blue-600 dark:text-blue-400 border-blue-500/30 hover:bg-blue-500/10 flex items-center gap-1.5 transition-all"
-                                >
-                                    <Users size={14} />
-                                    <span>从账号库选择账号</span>
-                                </button>
                             </div>
 
                             <div className="space-y-4">
@@ -689,18 +1063,33 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                         <label className={`text-xs font-semibold ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                                             充值凭证 (Session JSON / 邮箱----sessionKey / KYC 链接)
                                         </label>
-                                        <button
-                                            onClick={() => setActiveTab('guide')}
-                                            className="text-xs text-emerald-500 hover:underline flex items-center gap-1"
-                                        >
-                                            <HelpCircle size={12} />
-                                            <span>查看凭证提取教程</span>
-                                        </button>
+                                        <div className="flex items-center gap-1">
+                                            <SecretVisibilityButton
+                                                visible={Boolean(revealedSecrets.credential)}
+                                                onToggle={() => toggleSecretVisibility('credential')}
+                                                label="充值凭证"
+                                                disabled={submittingTask}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => setActiveTab('guide')}
+                                                className="text-xs text-emerald-500 hover:underline flex items-center gap-1"
+                                            >
+                                                <HelpCircle size={12} />
+                                                <span>查看凭证提取教程</span>
+                                            </button>
+                                        </div>
                                     </div>
-                                    <textarea
+                                    <MaskedTextarea
+                                        revealed={Boolean(revealedSecrets.credential)}
+                                        maskLabel="充值凭证"
+                                        maskClassName="p-3.5 text-xs font-mono text-slate-400"
                                         rows={4}
                                         value={tokenInput}
                                         onChange={e => setTokenInput(e.target.value)}
+                                        disabled={submittingTask}
+                                        autoComplete="off"
+                                        spellCheck={false}
                                         placeholder="粘贴来自 chatgpt.com/api/auth/session 的完整 JSON，或输入 user@example.com----sk-ant-sid02-xxx"
                                         className={`w-full p-3.5 rounded-2xl border text-xs font-mono outline-none transition-all ${
                                             darkMode
@@ -735,7 +1124,14 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                         <input
                                             type="email"
                                             value={accountEmail}
-                                            onChange={e => { setAccountEmail(e.target.value); setEmailConfirmed(false); }}
+                                            onChange={e => {
+                                                const value = e.target.value;
+                                                accountEmailRef.current = value;
+                                                autoFilledEmailRef.current = '';
+                                                setAccountEmail(value);
+                                                setEmailConfirmed(false);
+                                            }}
+                                            disabled={submittingTask}
                                             placeholder="user@gmail.com"
                                             className={`w-full px-4 py-2.5 rounded-2xl border text-sm outline-none transition-all ${
                                                 darkMode
@@ -746,17 +1142,18 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                     </div>
 
                                     <div className="flex flex-col justify-end">
-                                        <label className={`flex items-center gap-2 p-3 rounded-2xl border cursor-pointer select-none text-xs ${
+                                        {renewalEnabled && <label className={`flex items-center gap-2 p-3 rounded-2xl border cursor-pointer select-none text-xs ${
                                             darkMode ? 'bg-slate-900/60 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
                                         }`}>
                                             <input
                                                 type="checkbox"
                                                 checked={isRenewal}
                                                 onChange={e => setIsRenewal(e.target.checked)}
+                                                disabled={submittingTask || !renewalSupported}
                                                 className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500"
                                             />
                                             <span>仅续费模式（为已绑定卡充值续期，不添加新卡）</span>
-                                        </label>
+                                        </label>}
                                     </div>
                                 </div>
                             </div>
@@ -781,6 +1178,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                         type="checkbox"
                                         checked={emailConfirmed}
                                         onChange={e => setEmailConfirmed(e.target.checked)}
+                                        disabled={submittingTask}
                                         className="w-4 h-4 mt-0.5 rounded text-emerald-600 focus:ring-emerald-500"
                                     />
                                     <span>我已仔细核对充值邮箱为 <strong>{accountEmail || '(未填写)'}</strong>，确认账号所有权归属正确。</span>
@@ -793,6 +1191,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                         type="checkbox"
                                         checked={agreeTerms}
                                         onChange={e => setAgreeTerms(e.target.checked)}
+                                        disabled={submittingTask || !agreementContent}
                                         className="w-4 h-4 mt-0.5 rounded text-emerald-600 focus:ring-emerald-500"
                                     />
                                     <span>
@@ -864,7 +1263,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                 <div className="mt-4 pt-4 border-t border-emerald-500/20 flex gap-2">
                                     <button
                                         onClick={() => {
-                                            const queryVal = createdTask.task_no || createdTask.redeem_code;
+                                            const queryVal = createdTask.task_no;
                                             setLookupCdk(queryVal);
                                             setActiveTab('lookup');
                                             handleSingleLookup(queryVal);
@@ -928,7 +1327,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                 >
                                     单个查询
                                 </button>
-                                <button
+                                {batchLookupEnabled && <button
                                     onClick={() => setLookupMode('batch')}
                                     className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
                                         lookupMode === 'batch'
@@ -937,24 +1336,45 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                     }`}
                                 >
                                     批量查询 (最多50个)
-                                </button>
+                                </button>}
                             </div>
                         </div>
 
                         {lookupMode === 'single' ? (
                             <div className="space-y-4">
                                 <div className="flex gap-3">
+                                    <div className="relative flex-1">
                                     <input
-                                        type="text"
+                                        type={revealedSecrets.lookupCdk ? 'text' : 'password'}
                                         value={lookupCdk}
-                                        onChange={e => setLookupCdk(e.target.value)}
+                                        onChange={e => {
+                                            const value = e.target.value;
+                                            setLookupCdk(value);
+                                            if (value.trim() !== singleTaskQuery) {
+                                                lookupRequestId.current += 1;
+                                                lookupController.current?.abort();
+                                                setLookupLoading(false);
+                                                setSingleTaskResult(null);
+                                                setSingleTaskQuery('');
+                                            }
+                                        }}
                                         placeholder="输入 CDK 卡密或任务编号（如 PLUS-XXXX 或 TK-2026...）"
-                                        className={`flex-1 px-4 py-3 rounded-2xl border text-sm font-mono outline-none transition-all ${
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                        className={`w-full px-4 py-3 pr-12 rounded-2xl border text-sm font-mono outline-none transition-all ${
                                             darkMode
                                                 ? 'bg-slate-900 border-slate-700 text-slate-100 focus:border-emerald-500'
                                                 : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-emerald-500'
                                         }`}
                                     />
+                                    <SecretVisibilityButton
+                                        visible={Boolean(revealedSecrets.lookupCdk)}
+                                        onToggle={() => toggleSecretVisibility('lookupCdk')}
+                                        label="查询卡密"
+                                        disabled={lookupLoading}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2"
+                                    />
+                                    </div>
                                     <button
                                         onClick={() => handleSingleLookup()}
                                         disabled={lookupLoading || !lookupCdk.trim()}
@@ -987,45 +1407,47 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                                     </span>
                                                 </div>
                                                 <p className="text-xs text-slate-400 mt-1 font-mono">
-                                                    卡密：{singleTaskResult.redeem_code}
+                                                    任务编号：{singleTaskResult.task_no || '待分配'}
                                                 </p>
                                             </div>
 
                                             {/* 操作按钮组 */}
                                             <div className="flex items-center gap-2">
-                                                {singleTaskResult.status === 'processing' && (
+                                                {['pending', 'processing'].includes(singleTaskResult.status) && (
                                                     <>
                                                         <button
-                                                            onClick={() => setActionModal({ type: 'recall', task: singleTaskResult })}
+                                                            onClick={() => openTaskAction('recall')}
                                                             className="px-3.5 py-2 rounded-xl text-xs font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30 hover:bg-amber-500/20 transition-all"
                                                         >
                                                             撤回任务
                                                         </button>
                                                         <button
-                                                            onClick={() => setActionModal({ type: 'close', task: singleTaskResult })}
+                                                            onClick={() => openTaskAction('close')}
                                                             className="px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/30 hover:bg-rose-500/20 transition-all"
                                                         >
                                                             关闭并销毁
                                                         </button>
                                                     </>
                                                 )}
-                                                {singleTaskResult.is_mock && singleTaskResult.task_no ? <a
-                                                    href={`/api/recharge/tasks/invoice/download?task_no=${encodeURIComponent(singleTaskResult.task_no)}`}
-                                                    target="_blank"
-                                                    rel="noreferrer"
-                                                    className="px-3.5 py-2 rounded-xl text-xs font-semibold border border-slate-600 text-slate-300 hover:bg-slate-700/50 transition-all flex items-center gap-1.5"
-                                                >
-                                                    <Download size={13} />
-                                                    <span>对账凭证</span>
-                                                </a> : <span className="text-xs text-slate-400">真实凭证下载暂未开放</span>}
+                                                {singleTaskResult.is_mock ? (
+                                                    /^(TK-)/i.test(singleTaskQuery.trim()) || !['pending', 'processing', 'unknown', 'completed', 'failed', 'recalled', 'closed'].includes(singleTaskResult.status) ? (
+                                                        <span className="text-xs text-slate-400">请使用完整卡密查询后下载对账凭证</span>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            onClick={handleInvoiceDownload}
+                                                            disabled={invoiceDownloading || !singleTaskQuery.trim()}
+                                                            className="px-3.5 py-2 rounded-xl text-xs font-semibold border border-slate-600 text-slate-300 hover:bg-slate-700/50 disabled:opacity-50 transition-all flex items-center gap-1.5"
+                                                        >
+                                                            <Download size={13} />
+                                                            <span>{invoiceDownloading ? '下载中...' : '对账凭证'}</span>
+                                                        </button>
+                                                    )
+                                                ) : <span className="text-xs text-slate-400">真实凭证下载暂未开放</span>}
                                             </div>
                                         </div>
 
-                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4 text-xs">
-                                            <div>
-                                                <span className="text-slate-400 block mb-1">接收邮箱</span>
-                                                <span className="font-semibold">{singleTaskResult.account_email || '-'}</span>
-                                            </div>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mt-4 text-xs">
                                             <div>
                                                 <span className="text-slate-400 block mb-1">专卡尾号</span>
                                                 <span className="font-mono font-semibold">{singleTaskResult.card_last4 || '****'}</span>
@@ -1052,10 +1474,21 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                         ) : (
                             /* 批量查询面板 */
                             <div className="space-y-4">
-                                <textarea
+                                <MaskedTextarea
+                                    revealed={Boolean(revealedSecrets.batchCdk)}
+                                    maskLabel="批量卡密"
+                                    maskClassName="p-4 text-xs font-mono text-slate-400"
                                     rows={5}
                                     value={batchCdkText}
-                                    onChange={e => setBatchCdkText(e.target.value)}
+                                    onChange={e => {
+                                        batchLookupRequestId.current += 1;
+                                        batchLookupController.current?.abort();
+                                        setLookupLoading(false);
+                                        setBatchResults([]);
+                                        setBatchCdkText(e.target.value);
+                                    }}
+                                    autoComplete="off"
+                                    spellCheck={false}
                                     placeholder="每行输入一个卡密，支持逗号或换行分隔（单次上限 50 个）&#10;PLUS-XXXX-001&#10;PRO5X-YYYY-002"
                                     className={`w-full p-4 rounded-2xl border text-xs font-mono outline-none transition-all ${
                                         darkMode
@@ -1064,7 +1497,15 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                     }`}
                                 />
                                 <div className="flex justify-between items-center">
-                                    <span className="text-xs text-slate-400">已输入 {batchCdkText.split(/[\n,;\s]+/).filter(Boolean).length} / 50 个卡密</span>
+                                    <div className="flex items-center gap-2">
+                                        <SecretVisibilityButton
+                                            visible={Boolean(revealedSecrets.batchCdk)}
+                                            onToggle={() => toggleSecretVisibility('batchCdk')}
+                                            label="批量卡密"
+                                            disabled={lookupLoading}
+                                        />
+                                        <span className="text-xs text-slate-400">已输入 {batchCdkText.split(/[\n,;\s]+/).filter(Boolean).length} / 50 个卡密</span>
+                                    </div>
                                     <button
                                         onClick={handleBatchLookup}
                                         disabled={lookupLoading || !batchCdkText.trim()}
@@ -1080,19 +1521,17 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                         <table className="w-full text-left text-xs">
                                             <thead className={darkMode ? 'bg-slate-900 text-slate-400' : 'bg-slate-100 text-slate-600'}>
                                                 <tr>
-                                                    <th className="p-3">卡密</th>
+                                                    <th className="p-3">任务编号</th>
                                                     <th className="p-3">套餐</th>
-                                                    <th className="p-3">关联邮箱</th>
                                                     <th className="p-3">当前状态</th>
                                                     <th className="p-3">创建时间</th>
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-700/40">
                                                 {batchResults.map((item, idx) => (
-                                                    <tr key={idx} className={darkMode ? 'hover:bg-slate-750' : 'hover:bg-slate-50'}>
-                                                        <td className="p-3 font-mono font-semibold">{item.redeem_code}</td>
+                                                    <tr key={item.task_no || idx} className={darkMode ? 'hover:bg-slate-750' : 'hover:bg-slate-50'}>
+                                                        <td className="p-3 font-mono font-semibold">{item.task_no || '-'}</td>
                                                         <td className="p-3">{item.plan_type}</td>
-                                                        <td className="p-3">{item.account_email || '-'}</td>
                                                         <td className="p-3">
                                                             <span className={`px-2 py-0.5 rounded-md font-bold ${
                                                                 item.ok ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-700 text-slate-400'
@@ -1125,20 +1564,32 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                         </p>
 
                         <div className="flex gap-3">
-                            <input
-                                type="text"
-                                value={billingToken}
-                                onChange={e => setBillingToken(e.target.value)}
-                                placeholder="输入账号 accessToken 或 chatgpt.com/api/auth/session 返回内容"
-                                className={`flex-1 px-4 py-3 rounded-2xl border text-sm font-mono outline-none transition-all ${
-                                    darkMode
-                                        ? 'bg-slate-900 border-slate-700 text-slate-100 focus:border-emerald-500'
-                                        : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-emerald-500'
-                                }`}
-                            />
+                            <div className="relative flex-1">
+                                <input
+                                    type={revealedSecrets.billingToken ? 'text' : 'password'}
+                                    value={billingToken}
+                                    onChange={e => setBillingToken(e.target.value)}
+                                    disabled={billingActionLoading}
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    placeholder="输入账号 accessToken 或 chatgpt.com/api/auth/session 返回内容"
+                                    className={`w-full px-4 py-3 pr-12 rounded-2xl border text-sm font-mono outline-none transition-all ${
+                                        darkMode
+                                            ? 'bg-slate-900 border-slate-700 text-slate-100 focus:border-emerald-500'
+                                            : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-emerald-500'
+                                    }`}
+                                />
+                                <SecretVisibilityButton
+                                    visible={Boolean(revealedSecrets.billingToken)}
+                                    onToggle={() => toggleSecretVisibility('billingToken')}
+                                    label="账单凭证"
+                                    disabled={billingActionLoading}
+                                    className="absolute right-2 top-1/2 -translate-y-1/2"
+                                />
+                            </div>
                             <button
                                 onClick={handleQueryBilling}
-                                disabled={billingLoading || !billingToken.trim()}
+                                disabled={billingLoading || billingActionLoading || !billingToken.trim()}
                                 className="px-6 py-3 rounded-2xl text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 transition-all shadow-md shadow-emerald-600/20 flex items-center gap-2 flex-shrink-0"
                             >
                                 {billingLoading ? <RefreshCw size={16} className="animate-spin" /> : <Search size={16} />}
@@ -1172,7 +1623,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                         {billingResult.auto_renew ? (
                                             <button
                                                 onClick={handleCancelSubscription}
-                                                disabled={billingActionLoading}
+                                                disabled={billingActionLoading || billingLoading}
                                                 className="px-4 py-2 rounded-xl text-xs font-bold text-amber-500 border border-amber-500/30 hover:bg-amber-500/10 transition-all flex items-center gap-1.5"
                                             >
                                                 <Power size={14} />
@@ -1181,7 +1632,7 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                         ) : (
                                             <button
                                                 onClick={handleResumeSubscription}
-                                                disabled={billingActionLoading}
+                                                disabled={billingActionLoading || billingLoading}
                                                 className="px-4 py-2 rounded-xl text-xs font-bold text-emerald-500 border border-emerald-500/30 hover:bg-emerald-500/10 transition-all flex items-center gap-1.5"
                                             >
                                                 <RefreshCw size={14} />
@@ -1207,15 +1658,15 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                                         <span className="font-semibold">{inv.date}</span>
                                                         <span className="text-slate-400 ml-2">金额: {inv.amount}</span>
                                                     </div>
-                                                    {billingResult.is_mock && inv.slug ? <a
-                                                        href={`/api/recharge/tasks/invoice/download?slug=${encodeURIComponent(inv.slug)}`}
-                                                        target="_blank"
-                                                        rel="noreferrer"
+                                                    {billingResult.is_mock && inv.slug ? <button
+                                                        type="button"
+                                                        onClick={() => handleBillingInvoiceDownload(inv.slug, inv.id)}
+                                                        disabled={invoiceDownloading}
                                                         className="text-emerald-500 hover:underline flex items-center gap-1"
                                                     >
                                                         <Download size={13} />
-                                                        <span>下载收据 (TXT)</span>
-                                                    </a> : <span className="text-xs text-slate-400">真实凭证下载暂未开放</span>}
+                                                        <span>{invoiceDownloading ? '下载中...' : '下载收据 (TXT)'}</span>
+                                                    </button> : <span className="text-xs text-slate-400">真实凭证下载暂未开放</span>}
                                                 </div>
                                             ))}
                                         </div>
@@ -1267,76 +1718,19 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                 </div>
             )}
 
-            {/* ==================== 模态弹窗：从账号库选择账号 ==================== */}
-            {showAccountPicker && (
-                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
-                    <div className={`rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden border ${
-                        darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
-                    }`}>
-                        <div className="p-5 border-b border-slate-700/40 flex justify-between items-center">
-                            <div className="flex items-center gap-2 font-bold text-base">
-                                <Users size={18} className="text-emerald-500" />
-                                <span>选择 Google 资产库账号</span>
-                            </div>
-                            <button onClick={() => setShowAccountPicker(false)} className="text-slate-400 hover:text-slate-200">
-                                <X size={20} />
-                            </button>
-                        </div>
-
-                        <div className="p-5 space-y-4">
-                            <input
-                                type="text"
-                                value={accountSearch}
-                                onChange={e => setAccountSearch(e.target.value)}
-                                placeholder="搜索邮箱或备注..."
-                                className={`w-full px-4 py-2.5 rounded-xl border text-xs outline-none ${
-                                    darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-200'
-                                }`}
-                            />
-
-                            <div className="max-h-72 overflow-y-auto space-y-1.5 pr-1">
-                                {filteredAccounts.length > 0 ? (
-                                    filteredAccounts.map(acc => (
-                                        <button
-                                            key={acc.id}
-                                            onClick={() => {
-                                                setAccountEmail(acc.email);
-                                                setEmailConfirmed(false);
-                                                setShowAccountPicker(false);
-                                                showNotification?.(`已选择账号：${acc.email}`, 'success');
-                                            }}
-                                            className={`w-full p-3 rounded-xl border text-left flex justify-between items-center transition-all ${
-                                                darkMode
-                                                    ? 'bg-slate-900/60 border-slate-700/60 hover:bg-slate-700 hover:border-emerald-500'
-                                                    : 'bg-slate-50 border-slate-200 hover:bg-emerald-50/50 hover:border-emerald-400'
-                                            }`}
-                                        >
-                                            <div>
-                                                <div className="font-semibold text-xs">{acc.email}</div>
-                                                {acc.remark && <div className="text-[11px] text-slate-400 mt-0.5">{acc.remark}</div>}
-                                            </div>
-                                            <span className="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-semibold">
-                                                选择
-                                            </span>
-                                        </button>
-                                    ))
-                                ) : (
-                                    <p className="text-xs text-center py-6 text-slate-400">未找到匹配的账号资产</p>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
             {/* ==================== 模态弹窗：协议查看 ==================== */}
             {showAgreementModal && (
                 <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
-                    <div className={`rounded-3xl shadow-2xl w-full max-w-xl overflow-hidden border ${
+                    <div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="recharge-agreement-title"
+                        className={`rounded-3xl shadow-2xl w-full max-w-xl overflow-hidden border ${
                         darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
-                    }`}>
+                    }`}
+                    >
                         <div className="p-5 border-b border-slate-700/40 flex justify-between items-center">
-                            <h3 className="font-bold text-base flex items-center gap-2">
+                            <h3 id="recharge-agreement-title" className="font-bold text-base flex items-center gap-2">
                                 <FileText size={18} className="text-emerald-500" />
                                 <span>充值服务协议与须知</span>
                             </h3>
@@ -1345,8 +1739,8 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                             </button>
                         </div>
                         <div className="p-6 max-h-[65vh] overflow-y-auto">
-                            <div
-                                dangerouslySetInnerHTML={{ __html: agreementContent }}
+                            <SafeAgreementContent
+                                html={agreementContent}
                                 className={`prose prose-sm max-w-none ${darkMode ? 'prose-invert' : ''}`}
                             />
                         </div>
@@ -1368,11 +1762,16 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
             {/* ==================== 模态弹窗：写操作二次确认 (撤回 / 关闭) ==================== */}
             {actionModal && (
                 <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
-                    <div className={`rounded-3xl shadow-2xl w-full max-w-md overflow-hidden border ${
+                    <div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="recharge-action-title"
+                        className={`rounded-3xl shadow-2xl w-full max-w-md overflow-hidden border ${
                         darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
-                    }`}>
+                    }`}
+                    >
                         <div className="p-6">
-                            <div className="flex items-center gap-3 text-amber-500 mb-3 font-bold text-base">
+                            <div id="recharge-action-title" className="flex items-center gap-3 text-amber-500 mb-3 font-bold text-base">
                                 <AlertTriangle size={24} />
                                 <span>{actionModal.type === 'recall' ? '确认撤回该充值任务？' : '危险：确认关闭并销毁卡密？'}</span>
                             </div>
@@ -1381,6 +1780,54 @@ const RechargeView = ({ accounts = [], darkMode, showNotification }) => {
                                     ? '撤回任务后，充值流水将暂时中止，您可以修改凭证后重新发起提交。'
                                     : '关闭任务将永久注销当前 CDK 卡密并清理进行中的专卡，该操作不可撤销！'}
                             </p>
+                            <div className={`mb-4 rounded-xl border px-3.5 py-2.5 text-xs ${
+                                darkMode ? 'border-slate-700 bg-slate-900/60' : 'border-slate-200 bg-slate-50'
+                            }`}>
+                                <span className="text-slate-400">目标任务：</span>
+                                <strong className="ml-1 font-mono">{actionModal.task?.task_no || '未知任务'}</strong>
+                                <p className="mt-1 text-slate-400">输入的卡密必须属于该任务，否则操作会被拒绝。</p>
+                            </div>
+
+                            <div className="space-y-3 mb-5">
+                                <div>
+                                    <label className="block text-xs font-semibold mb-1.5">完整 CDK 卡密</label>
+                                    <div className="relative">
+                                        <input
+                                            type={revealedSecrets.actionCdk ? 'text' : 'password'}
+                                            value={actionModal.redeemCode}
+                                            onChange={event => setActionModal(current => ({ ...current, redeemCode: event.target.value }))}
+                                            placeholder="请输入完整卡密"
+                                            autoComplete="off"
+                                            spellCheck={false}
+                                            disabled={actionLoading}
+                                            className={`w-full px-3.5 py-2.5 pr-12 rounded-xl border text-sm font-mono outline-none disabled:opacity-60 ${
+                                                darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-200'
+                                            }`}
+                                        />
+                                        <SecretVisibilityButton
+                                            visible={Boolean(revealedSecrets.actionCdk)}
+                                            onToggle={() => toggleSecretVisibility('actionCdk')}
+                                            label="操作卡密"
+                                            disabled={actionLoading}
+                                            className="absolute right-2 top-1/2 -translate-y-1/2"
+                                        />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold mb-1.5">账号邮箱</label>
+                                    <input
+                                        type="email"
+                                        value={actionModal.email}
+                                        onChange={event => setActionModal(current => ({ ...current, email: event.target.value }))}
+                                        placeholder="user@gmail.com"
+                                        autoComplete="off"
+                                        disabled={actionLoading}
+                                        className={`w-full px-3.5 py-2.5 rounded-xl border text-sm outline-none disabled:opacity-60 ${
+                                            darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-200'
+                                        }`}
+                                    />
+                                </div>
+                            </div>
 
                             <div className="flex justify-end gap-3">
                                 <button

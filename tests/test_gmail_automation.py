@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from app import create_app, db
+from tests.auth_helpers import login_admin
 from app.models.gmail_connection import GmailConnection
 from app.models.gmail_task_log import GmailTaskLog
 
@@ -16,8 +17,8 @@ class GmailAutomationApiTestCase(unittest.TestCase):
         db.drop_all()
         db.create_all()
         self.client = self.app.test_client()
-        with self.client.session_transaction() as session:
-            session['authenticated'] = True
+        self.client.environ_base['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'
+        login_admin(self.client)
         self.connection = GmailConnection(
             email='automation@example.test',
             token_data='encrypted-token',
@@ -176,7 +177,7 @@ class GmailAutomationApiTestCase(unittest.TestCase):
 
         encoded = base64.urlsafe_b64encode(json.dumps({
             'emailAddress': self.connection.email,
-            'historyId': 'history-1',
+            'historyId': '200',
         }).encode('utf-8')).decode('ascii')
         with patch('app.routes.api.GmailService.process_notification', return_value={
             'connectionId': self.connection.id,
@@ -188,7 +189,7 @@ class GmailAutomationApiTestCase(unittest.TestCase):
                 json={'message': {'data': encoded}},
             )
         self.assertEqual(response.status_code, 200)
-        process_notification.assert_called_once_with(self.connection.email, 'history-1')
+        process_notification.assert_called_once_with(self.connection.email, '200')
 
 
 if __name__ == '__main__':

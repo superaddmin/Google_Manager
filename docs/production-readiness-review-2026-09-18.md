@@ -1,234 +1,215 @@
-# 全功能与生产上线审查（2026-09-18）
+# 全功能与生产上线审查（2026-09-18，2026-09-20 复核）
+
+> 本报告标题保留原审查日期；正文按 2026-09-20 当前工作区源码、未提交改动、配置和测试文件刷新。报告只判断仓库实现和可复核的本地证据，不代替目标 Linux 主机、真实 Google 账号或充值上游的验收。
 
 ## 1. 结论
 
-**No-Go：当前工作区不能认定为按修订计划完成，也不具备直接对公网提供真实充值交付服务的生产条件。**
+**No-Go：当前工作区不能证明已具备真实充值或完整自动化业务的生产放行条件。**
 
-- 已具备 React 页面、Flask 路由、部分 Google/Gmail 业务能力和部署骨架；不等于业务闭环、生产一致性与安全边界完整。
-- 充值仍是“尝试上游 + 自动模拟兜底”，不是修订计划要求的 disabled/mock/live 隔离。生产环境关闭上游后仍可创建模拟任务，故 `RECHARGE_UPSTREAM_ENABLED=false` **不是禁用充值的安全开关**。
-- 现有 156 项测试全部通过，但不覆盖本次复现的严重缺陷；其中充值只有 6 个后端测试，现有前端 UI 套件没有充值流程用例。
-- 本次只新增本审查报告，不修复业务代码、不更新依赖、不提交 Git、不消费真实卡密、不变更订阅、不登录真实账号。
+当前代码已经实现了以下基础：
 
-| 审查轴 | 判定 | 主要原因 |
+- Flask 应用工厂区分 development、production、testing；非测试环境要求管理员密码，production 额外要求至少 32 字节 `SECRET_KEY`、至少 16 字符非示例 `ADMIN_PASSWORD`、有效 Fernet 格式的 `GMAIL_TOKEN_ENCRYPTION_KEY`，并拒绝 `RECHARGE_MODE=mock` 或未知值。
+- 充值服务区分 `disabled`、`mock`、`live`。live 任务先写入数据库 `pending`，网络 I/O 在互斥锁外执行；网络/上游不确定时写入 `unknown`，查询可将上游状态回写。challenge、OAuth state、任务所有权、运行任务和充值/账单变更均有数据库模型。
+- web 与独立 `app.worker` 共享 `RuntimeJob`/`RuntimeState`，`/health/ready` 会检查数据库、worker 心跳、维护失败、自动化锁和 Gmail 动作重试状态。
+- 管理 API 需要 Flask session；公共充值创建/查询接口匿名可用，但撤回/关闭须匹配任务号、卡密、邮箱和原创建会话 HMAC 所有权（或管理员会话）。写请求还需要 JSON、`X-Requested-With`、可信 Origin/Fetch 元数据，并按 IP 和卡密做数据库限流。
+- live 账单取消/恢复使用 `recharge_billing_mutations` 持久化凭证摘要、业务意图、UUID 操作号、单次 claim 的 `lease_token`、租约及 `pending/unknown/done`；摘要键由长期 `GMAIL_TOKEN_ENCRYPTION_KEY` 派生，查询和失败回写通过快照/CAS 避免旧请求覆盖重新占用的操作。
+- production 页面响应包含 CSP，脚本与连接仅允许同源；充值协议由前端标签/属性/URL 白名单转换为 React 节点，敏感输入默认掩码显示。
+
+仍然不能放行的原因：
+
+- `RECHARGE_UPSTREAM_URL` 只有通用 HTTP JSON 适配层，没有在仓库中定义或验证真实上游的鉴权、签名、幂等、退款和数据处理契约；live 只能在获授权的 sandbox 中验收。
+- 充值蓝图仍是 CDK 履约/订阅工作台，不包含金额、币种、优惠、支付订单、支付渠道、支付 webhook 验签/去重、余额账户或账本原子更新；因此“金额输入 → 支付 → 回调 → 余额”链路仍为 P0 No-Go。
+- 当前工作区没有完成目标 Linux 上的 Docker 构建、容器运行、systemd 启停、HTTPS/OAuth 回调、备份恢复、容量和故障演练。Windows 沙盒的临时目录 ACL 及 Node `spawn EPERM` 限制了本地部分命令，不能替代这些证据。
+- 生产数据库由 `python -m app.manage init-db` 使用 `create_all()` 初始化，并只额外补齐 `gmail_executions.lease_token`；仓库没有通用迁移版本链。已有数据库升级前必须备份并人工核对表结构。
+- 正式基线首次创建 `recharge_billing_mutations` 时会包含账单 `lease_token`；若曾运行中间开发版本并已有不含该列的同名表，`create_all()` 不会补列，必须停服务并在保留未决记录的前提下受控迁移。
+- 新的任务所有权依赖浏览器 session；清 Cookie、换浏览器、轮换 `SECRET_KEY` 或历史任务缺少 `recharge_task_access` 行时匿名危险操作会失败关闭，只能由管理员核对处理。这不是长期客户账户恢复机制。
+- 账号密码、恢复邮箱和 TOTP secret 在 SQLite 模型中仍以字段形式保存；接口会对锁定账号脱敏/拒绝读取，但数据库文件权限、密钥轮换和保留策略必须由部署方落实。
+- 充值任务的卡密和邮箱仍按模型字段保存，未完成存量敏感字段加密迁移；KYC 当前只限制为 HTTP/HTTPS URL，上游是否抓取以及 SSRF 边界仍需真实契约确认。
+- mock 账单下载输出 TXT，live 账单下载明确返回 503；这不是已验证的真实 PDF 发票或支付凭证。
+
+## 2. 代码与目录事实
+
+### 2.1 应用入口和运行组件
+
+| 组件 | 实际入口或路径 | 当前行为 |
 | --- | --- | --- |
-| 规格符合性 | 未达标 | 模式隔离、真实挑战、状态持久化、幂等、轮询、下载与数据最小化未落实 |
-| 生产架构与安全规范 | 未达标 | 默认会话密钥、镜像敏感文件、多进程状态、OAuth 部署与守护生命周期问题 |
-| 现有自动化与构建 | 通过但不足 | 156 项通过且构建一致；不能代替缺失的错误路径、真实契约和生产环境验收 |
+| Flask 工厂 | `app/__init__.py` | `create_app('development'|'production'|'testing')`；注册主页面、管理 API 和充值蓝图 |
+| 本地入口 | `run.py` | `load_dotenv()` 后创建 app；直接运行监听 `127.0.0.1:8002` |
+| 数据库初始化 | `python -m app.manage init-db` | 调用 `db.create_all()`（包括 `recharge_task_access`、`recharge_billing_mutations`），再为 `gmail_executions` 补 `lease_token` 列 |
+| 后台 worker | `python -m app.worker` | 单实例锁、队列消费、Gmail 同步/维护、live 充值对账；`--check` 检查最近 30 秒心跳 |
+| web 进程 | `gunicorn -c deploy/gunicorn.conf.py run:app` | 默认 `127.0.0.1:8002`，gthread，默认 2 workers、4 threads |
+| 健康端点 | `GET /health/ready` | 数据库、worker、配置的 Gmail 客户端文件可读性、维护失败计数、仍占用 `active_key` 的失败自动化任务，以及启用规则下带执行记录的失败 Gmail 动作均符合条件时 200，否则 503 |
+| SQLite 备份 | `deploy/backup_database.py SOURCE DESTINATION` | 只读打开源数据库；目标父目录须存在、目标文件须不存在，先创建 0600 文件再执行 SQLite backup 和 integrity check |
 
-## 2. 范围与证据边界
+### 2.2 主要模型
 
-- 基线：`92d452c3b11e0098e87801594188283b7071718d`，审查包含当前已跟踪改动和未跟踪源码，不仅是 HEAD 已提交内容。
-- 规格来源：`C:\Users\www\.gemini\antigravity\brain\dbe5b115-d713-4d1c-9de7-9df6c4f35dbf\implementation_plan.md` 的修订版。
-- 范围：账号管理、Googlemail、Gmail OAuth/收件箱/规则、批量授权、收信守护、安全防盗、充值前后端，以及 Docker/Compose/Gunicorn/Nginx/systemd/安装脚本。
-- 验证使用虚构凭证、内存 SQLite、Mock HTTP；没有读取 `.env` 内容、真实凭据、生产数据库或浏览器账号数据。仅检查了敏感路径是否存在。
-- 未验证真实第三方 API 契约、真实 Google 登录/回调、真实扣费/充值、Linux 容器运行、公网 TLS/防火墙、压力容量和恢复演练；不能对此作成功承诺。
-- P0：安全或业务真实性的首要阻塞；P1：功能/架构上线阻塞；P2：补强项或需要限定条件的风险。未核实能力与已复现缺陷分开记录。
+当前新增或参与运行流程的模型包括：
 
-## 3. P0：首要上线阻塞
+- 账号与历史：`Account`、`AccountHistory`；
+- Gmail：`GmailConnection`、`GmailWatch`、`GmailRule`、`GmailTaskLog`、`GmailActionConfirmation`、`GmailExecution`；
+- 自动化任务：`GooglemailTask`、`RuntimeJob`、`RuntimeState`；
+- 充值：`RechargeTask`、`RechargeOperation`、`RechargeMutation`、`RechargeTaskAccess`、`RechargeBillingMutation`、`OneTimeToken`；
+- 限流：`RequestLimit`、`LoginAttempt`。
 
-### P0-01 上游失败会变成“充值/取消续费成功”
+`OneTimeToken` 保存 token 的 SHA-256 摘要、可空的绑定摘要、JSON payload、过期时间和消费时间；原始 token/challenge 不写入任务模型。`RechargeTaskAccess` 只保存任务号及创建会话 HMAC，`RechargeBillingMutation` 只保存账单凭证 HMAC 和操作状态，二者都不保存原始 bearer。`Account.to_dict()` 对锁定账号清空密码、恢复邮箱和 secret；导出端点会把锁定账号的密码和 secret 写成 `******`，但数据库原值仍需部署权限保护。
 
-- 位置：`app/services/recharge_service.py:102`、`app/services/recharge_service.py:210`、`app/services/recharge_service.py:396`、`app/services/recharge_service.py:435`、`app/services/recharge_service.py:492`；`app/config.py:26`。
-- 根因：HTTP 异常、超时、解析失败被吞掉并返回 None，业务层接着生成本地有效卡密、处理中任务、已付款账单或取消/恢复成功。上游业务拒绝也可能走同一路径。
-- 复现：模拟 live 请求超时后，任务创建仍为 HTTP 201/processing，取消续费仍为 HTTP 200/auto_renew=false。隔离 production 应用关闭上游后，同样可创建任务并返回 201。
-- 后果：用户可能误认为已充值或已停止扣费；上游已受理但响应丢失时也无法辨识，后续重试有重复操作风险。
-- 修正门槛：显式模式与独立适配器；生产默认 disabled，mock 不访问网络且有醒目标识；live 失败不得模拟成功，结果未知须持久记录并核对。按已验证能力开放，不以“官方代充”等硬编码文案替代证据。
+`GmailActionConfirmation` 与 `GmailTaskLog` 一对一关联，保存 `status`、`reviewer`、`note`、请求时间和审核时间；`GmailTaskLog.to_dict()` 会嵌入 confirmation 对象。
 
-### P0-02 部署模板默认会话密钥可伪造管理员登录
+## 3. 接口与行为核对
 
-- 位置：`docker-compose.yml:17`、`docker-compose.yml:19`；`docker-compose.yml:12` 同时将 8002 发布到所有接口。
-- 触发条件：部署者配置了启动所需其他项，但保留模板内公开的管理员密码/SECRET_KEY 默认值。并非断言当前真实 `.env` 正使用默认值。
-- 复现：仅在隔离 production 内存库中使用模板默认会话密钥签发测试 Cookie，未输入管理员密码，`GET /api/accounts` 从匿名 401 变为 200。报告与日志不包含密钥、Cookie 或账号内容。
-- 修正门槛：部署变量缺失立即失败，拒绝示例值；密钥单独生成和管理。若默认值或密钥曾暴露，需要轮换并失效已有会话。限制直接后端端口暴露，通过正确配置的 TLS 入口访问。
+### 3.1 管理接口
 
-### P0-03 Docker 构建会携带敏感文件
+`app/routes/api.py` 中除登录、登出、鉴权检查、Gmail Pub/Sub webhook 和 OAuth callback 外，接口均要求 `session['authenticated']`。除 Pub/Sub webhook 这个外部推送例外外，写请求还经过 `app/services/request_security.py`：
 
-- 位置：`Dockerfile:65` 的 `COPY . .` 与 `.dockerignore:1`。
-- 根因：忽略清单未排除 `.env`、`credentials.json`、实例库本体、账号源文件及完整敏感输出目录；仅忽略 `instance/*.db-journal` 不能排除数据库。
-- 本机事实：`.env` 与 `instance/` 存在；未读取其内容。按当前模板构建可能将秘密写入不可通过后续删除消除的镜像层。
-- 修正门槛：补齐构建上下文排除规则，运行时注入秘密；扫描最终镜像及构建产物。已经构建或推送过含秘密镜像时另行评估轮换与清理，不在本次审查中擅自执行。
+- Origin 存在时必须与当前请求的 scheme/netloc 相同；
+- `Sec-Fetch-Site` 为 `cross-site` 或 `same-site` 时拒绝；
+- 必须带 `X-Requested-With: XMLHttpRequest`（Pub/Sub webhook 不适用）；
+- 充值接口默认按 IP 和卡密各限 60 次/分钟，超限返回 429 和 `Retry-After: 60`。
 
-## 4. P1：充值功能与状态闭环
+主要管理功能是账号 CRUD/批量导入/出售状态/导出/统计、Gmail 消息/标签/规则/watch、批量 OAuth、Googlemail 自动化、安全中心和收信守护。Gmail 服务读取连接时会拒绝对应的锁定账号；锁定账号 API 不能读取 2FA、历史或敏感导出内容；删除账号前会取消关联自动化任务。
 
-### R01 查询尚未提交的 CDK 会死锁
+### 3.2 充值接口与状态
 
-- 位置：`app/services/recharge_service.py:23`、`app/services/recharge_service.py:259`、`app/services/recharge_service.py:263`、`app/services/recharge_service.py:135`。
-- `lookup_task()` 持有普通 Lock 后调用再次获取同一锁的 `validate_redeem_code()`，造成线程自锁。
-- 离线复现：未知 CDK 查询线程等待 1 秒仍未返回，共享锁仍被持有；源码锁顺序证明不是普通网络慢。随后该进程内其他需锁的充值操作也会阻塞。
-- 修复应重新划分锁内/锁外职责，尤其不能持锁进行网络校验；新增有截止时间的回归测试。
+充值蓝图在 `app/routes/recharge.py` 下挂载 `/api/recharge`。配置与响应事实如下：
 
-### R02 幂等、持久化和多进程一致性缺失
+- `GET /config`、`/features` 不要求管理员登录；`/agreement` 虽为 GET 仍调用 `ensure_enabled()`，disabled 模式返回 503。`/config` 的 `data` 为 `{features, dual_mode:true, mode, version:'1.0.0'}`，开关字段位于 `features`。
+- `GET /stats/avg-processing-time` 也调用 `ensure_enabled()`，接受 `product`（默认 `gpt`）和 `category`（默认 `card`），但当前返回固定的六项秒数常量，参数不参与计算。
+- `POST /redeem-codes/validate`：disabled 返回 503；mock 按卡密文本生成沙箱套餐；live 调用上游 `/user/redeem-codes/validate`。
+- `POST /submission-challenges`：challenge 有效 300 秒，绑定会话、模式、卡密、凭证、套餐和 `is_renewal`。
+- `POST /tasks`：校验卡密、套餐、凭证、邮箱、协议确认、邮箱确认和 challenge；mock 返回 `TK-MOCK-...` 并写入 `is_mock=true`；live 先写 `TK-LIVE-...` 的 `pending` 记录，再向上游 `/user/tasks` 发送 `idempotency_key` 和 `client_task_no`。
+- `GET /tasks/<task_no>`：按当前模式隔离任务；返回结果隐藏 `redeem_code`、`account_email`、`notify_email`。live 会按结构化上游任务号或卡密查询并回写。
+- `POST /tasks/lookup` 和 `/tasks/lookup-batch`：单查支持卡密或 `TK-` 前缀任务号（`TASK-` 不按任务号识别）；批量输入去重且最多 50 个。live 批量结果必须与请求侧去重集合一一对应，拒绝漏项、重复、未知卡密和非对象项，并按请求顺序输出；无本地任务的公开结果还必须带有效 `plan_type`。
+- `POST /tasks/recall`、`POST /tasks/close`：要求 `task_no`、`redeem_code`、`email` 和 `confirmed=true`；任务目标和当前模式必须匹配，且请求须来自创建任务的会话或管理员，否则统一返回 403。live 变更由 `RechargeMutation` 先占用操作，再调用上游，异常状态必须通过查询确认。
+- `POST /billing/query`、`cancel-subscription`、`resume-subscription`：要求凭证；取消/恢复必须 `confirmed=true`。mock 状态只保存在进程内 `_mock_subscriptions`；live 先从数据库占用操作号再转发，超时进入 `unknown`，相反动作被阻断，只有明确达到动作目标的查询才能完成对账。
+- `POST /tasks/invoice/download`：仅 mock 模式可用；标识从 JSON body 读取，必须命中当前 mock 任务或当前会话账单事实，返回 UTF-8 TXT。live 返回 503，不能对外宣称已完成真实发票下载。
+- `POST /billing/invoice-file`：返回本地 `/api/recharge/tasks/invoice/download` 的 POST 方法和 JSON payload；它不会从第三方下载 PDF，也不会把账单标识放入 query。
 
-- 位置：`app/services/recharge_service.py:23`、`app/services/recharge_service.py:210`、`deploy/gunicorn.conf.py:16`。
-- 任务、原始卡密与挑战都在进程内字典；计划中的 `app/models/recharge_operation.py` 不存在，默认 Gunicorn 为两个 worker。
-- 创建与查询落在不同进程时本地记录不一致，重启丢失。live 请求先访问上游再检查本地重复，无法靠后续字典检查阻止重复发送。
-- 离线复现：相同请求连续提交两次，模拟上游收到两次调用，未携带幂等键；没有持久化 pending/unknown 或恢复核对。
-- 修正门槛：先落操作记录再发送，数据库唯一约束、明确未知结果、重启恢复；上游只有明确支持幂等协议时才能声称可幂等重试。单 worker 仅可减轻进程分裂，不解决重启和结果不确定性。
+### 3.3 OAuth、Gmail 与队列
 
-### R03 “契约校验”没有落实挑战与核心业务约束
+- `GmailService` 使用 `GMAIL_CLIENT_SECRET_FILE` 和 `GMAIL_TOKEN_ENCRYPTION_KEY`；token 以 Fernet 加密保存。该 Fernet 密钥还派生 live 账单凭证的 HMAC 身份键，不能按普通可丢弃配置轮换。`GMAIL_REDIRECT_URI` 存在时覆盖 Gmail OAuth 自动回调 URL。
+- `OAuthStateManager` 的 state 写入 `one_time_tokens`，TTL 1800 秒；若 session 中存在 state，则 query state 必须匹配，随后还必须在数据库中已注册、未过期且未消费，callback 才会消费它。无 session state 的后台/无头回调仍可凭数据库中的有效注册 state 继续；session 不匹配、未注册或过期的 state 会被拒绝且不消费，重复回调也会被拒绝。
+- `GMAIL_PUBSUB_TOPIC` 是 watch 必填配置；webhook 校验 email/historyId，队列模式下写入 `gmail_notification` 任务。
+- `RuntimeQueue` 持久化 `googlemail`、`oauth`、`gmail_notification`、`gmail_sync` 任务；worker 重启时将 Gmail 同步任务重新排队，将无法安全恢复的自动化标为 failed 并保留必要的任务锁。
+- `GmailExecution` 为同一连接/规则/邮件建立执行键和租约，维护循环会重试到期动作；这只说明代码具备幂等和租约机制，未证明真实 Gmail 权限和 API 行为。
 
-- 位置：`app/services/recharge_service.py:80`、`app/services/recharge_service.py:156`、`app/services/recharge_service.py:186`、`app/routes/recharge.py:29`。
-- challenge 生成后存入字典，但创建只校验非空，未核验签发、期限、一次性消费、会话/卡密/套餐/凭证绑定；live 也使用本地伪造挑战，没有完成上游挑战流程。
-- 套餐任意字符串、任意非空凭证可通过；未再次核实真实卡密、bound_email 或 account_change_locked；协议是本地静态 HTML，未绑定版本。
-- 离线复现：从未签发的 challenge、任意套餐、不带 CSRF 的请求仍返回 201。
-- 17 个现有充值接口均已验证匿名 401，这是已落实项；但 `/csrf` 不存在，服务端无 CSRF/Origin 校验。携 Cookie 的 test_client 也接受不可信 Origin。
-- 定性边界：上述 Origin 测试只证明服务端未做校验，**不等于已经证明浏览器能跨站利用**；SameSite、JSON 请求与 CORS 仍影响实际可达性。CSRF 在此作为 P1 安全门槛，而非无条件跨站攻击结论。
-- 修正门槛：后端重验套餐/绑定关系、真实挑战与协议摘要，独立 CSRF 防护；未知能力禁用，不能为了接通界面假造成功条件。
+## 4. 配置、依赖和版本
 
-### R04 撤回、关闭和重新提交的状态机相互矛盾
+### 4.1 环境变量
 
-- 位置：`app/services/recharge_service.py:218`、`app/services/recharge_service.py:334`、`app/services/recharge_service.py:362`、`app/services/recharge_service.py:485`。
-- 撤回默认 `confirmed=True`，未提供确认也能操作；撤回/关闭只检查邮箱非空，没有与任务绑定邮箱比较或验证状态允许操作。
-- 已撤回状态不在允许重新创建的集合中，重新提交仍返回旧 recalled；closed 却允许重新创建，违背“卡密已注销”的提示。
-- 同一码多条记录时 `_find_task_by_code` 返回插入最早项，因此新建后查询仍可能返回旧 closed。
-- 上述路径均用虚构邮箱/CDK 离线复现。修复需明确状态转移、确认条件、卡密终止语义及当前任务唯一关联，不只是修改显示文字。
+当前源码和部署模板读取的关键变量如下：
 
-### R05 发票/收据下载没有可用闭环
-
-- 位置：`app/routes/recharge.py:187`、`app/routes/recharge.py:195`、`app/routes/recharge.py:245`；`frontend/src/components/RechargeView.jsx:895`、`frontend/src/components/RechargeView.jsx:1093`。
-- 前端打开 GET 链接，但下载路由仅支持 POST；账单接口返回的链接同样不满足路由方法与卡密参数契约。
-- 实测 GET 为 405；直接 POST 又因未导入 datetime 抛 NameError。即使只补导入，当前内容也是硬编码 PAID/$20 的 TXT，不是真实 PDF 发票。
-- 修正门槛：按已确认上游契约获取真实文件/链接，鉴权、参数、Blob 下载、类型/大小/文件名及目标白名单全部接通；不以虚构收据替代真实凭证。
-
-### R06 前端向导、任务号查询和进度更新未闭环
-
-- `frontend/src/services/api.js:434` 永远把输入作为 redeem_code 发到 lookup，没有调用任务号详情 API。
-- `frontend/src/components/RechargeView.jsx:750` 先 setLookupCdk 再立即调用依赖旧状态的查询，首次跳转可能不查询或查询旧内容。
-- CDK/邮箱修改未清除旧验证/确认；解析和选号还自动勾选邮箱确认：`frontend/src/components/RechargeView.jsx:148`、`frontend/src/components/RechargeView.jsx:509`、`frontend/src/components/RechargeView.jsx:622`、`frontend/src/components/RechargeView.jsx:1185`。
-- 没有充值任务自动轮询、退避、终态停止或乱序保护；`getRechargeConfig` 虽定义但未被页面使用，不能展示模式或按能力禁用入口。
-- 修正门槛：可测试的向导状态机、显式查询参数、任务号/CDK 分流、受控轮询和取消；增加真实界面级回归，不仅测试 API 函数。
-
-### R07 凭证与产品边界没有按计划收敛
-
-- `frontend/src/App.jsx:490` 向充值组件传完整账号对象，`app/models/account.py:43` 序列化含密码与 2FA 密钥；即使尚未把完整对象发送上游，也已违反最小组件边界。
-- 原始 CDK 在进程字典中保留，教程要求完整 Cookie JSON，提交后敏感输入没有完整清理策略；缺少清晰的第三方接收方/用途确认。
-- `app/services/recharge_service.py:113` 和教程仍将 Pro 5x 固定归入 Claude；原计划已要求核实映射。KYC 未按高敏感能力独立禁用或确认。
-- 修正门槛：只传 `{id,email}`、只提取必要凭证字段、CDK 采用受保护关联标识，核验产品映射与用途授权；未验证 KYC/套餐分支关闭。
-
-## 5. P1：项目其他模块与部署
-
-| 问题 | 证据位置 | 影响与修正方向 |
-| --- | --- | --- |
-| OAuth/任务/守护状态仍为进程私有 | `app/services/gmail_service.py:22`、`app/services/batch_oauth_service.py:83`、`app/services/googlemail_service.py:145`、`app/services/email_poller.py:30`、`app/services/auth_service.py:18` | 默认两 worker 下，任务状态/取消/去重/封禁不一致；无管理员会话的批量 OAuth 回调落错进程会丢 state。普通浏览器回调有 session_state 回退，不能一概说所有授权必失败。应共享必要状态并隔离后台任务生命周期。 |
-| 生产重定向配置链断开 | `app/services/gmail_service.py:103`、`app/config.py:22`、`deploy/nginx/google-manager.conf:59` | 服务读取 GMAIL_REDIRECT_URI，但配置类不加载该环境变量；代理转发 scheme 未由受信任代理配置处理，自动地址可能仍为 HTTP。显式加载/验证地址，按固定代理层数处理转发头并测试 HTTPS 回调。 |
-| 安全扫描失败却报告“干净” | `app/services/security_service.py:217`、`app/services/security_service.py:237`、`app/services/security_service.py:281`、`app/services/security_service.py:310` | settings 查询异常被吞掉，最终 isClean 可为 true。辅助离线复现多个权限错误仍显示干净。将 clean/error/unknown 分开，按具体 API 确认可支持的 scopes/账号类型，不能承诺权限失败等于无风险。 |
-| 锁号未阻断敏感操作 | `app/routes/api.py:456`、`app/services/account_service.py:487`、`frontend/src/components/AccountListView.jsx:406` | locked 账号仍能导出敏感数据，通用状态切换可绕过锁定；界面仍有显示/复制密码和 TOTP 的路径。后端统一执行锁定策略，不能仅用状态标签实现隔离。 |
-| 守护不是可恢复的 24H 服务 | `app/routes/api.py:1098`、`app/services/email_poller.py:87`、`app/services/email_poller.py:130` | 仅手动启动线程，worker 重启后不恢复，快速 stop/start 未等待旧线程退出；需要持久配置、单实例协调、可观测的独立生命周期与健康状态。 |
-| 收信动作缺少处理幂等 | `app/services/gmail_rule_service.py:219`、`app/models/gmail_task_log.py:30`、`app/services/security_service.py:383` | 未读邮件可反复产生规则日志/确认项，缺少 connection/rule/message 唯一处理键。OTP 页面主要为请求时读取，不能等同于守护已持久归集；补处理键、游标及准确文档。 |
-| 账号秘密及运行日志保护不足 | `app/models/account.py:34`、`app/services/account_service.py:416`、`app/services/account_service.py:438`、`app/services/batch_oauth_service.py:171`、`googlemail/src/batch-oauth-worker.mjs:69` | 密码/TOTP 及修改历史明文存储，任务明文文件权限/保留期未收敛，代理参数可能含凭据而被记录。加密或严格限定存储访问，历史保留脱敏信息，运行目录限制权限并清理/脱敏。 |
-| 原生安装与运行浏览器路径不同 | `deploy/setup-server.sh:80`、`deploy/systemd/google-manager.service:22` | 安装未指定 /ms-playwright，运行却指定该路径，默认原生部署可能找不到 Chromium；统一安装/运行路径并用服务用户做启动检查。 |
-| 高权限运行且关闭浏览器沙箱 | `deploy/systemd/google-manager.service:9`、`Dockerfile:75`、`googlemail/src/batch-oauth-worker.mjs:85` | systemd/容器缺少专用低权限运行身份，浏览器带 --no-sandbox，扩大受损后的影响；落实非 root、目录权限、必要的系统隔离。 |
-| Node.js 20 已不受常规维护 | `Dockerfile:45`、`deploy/setup-server.sh:60` | 官方日程显示 Node 20 已于 2026-04-30 EOL，并非本次审阅日才 EOL。模板仍安装 20，本地测试却用 22；切换到受支持 LTS 并验证整个自动化链，不在本次审查中擅自升级。 |
-
-## 6. P2 与发布前待核验项
-
-- 多个路由在校验 JSON 对象前调用 `.get`；发送 JSON 数组会产生 AttributeError/500，需统一输入形状、类型与长度校验。相关位置：`app/routes/recharge.py:73`。
-- 直接插入协议 HTML：`frontend/src/components/RechargeView.jsx:1232`。当前来源是本地硬编码，因此不认定已发生远程 XSS；接上第三方内容前必须安全清洗或改纯文本。
-- 缺少 accessToken 的 JSON 仍可能展示“已验证”；批量查询没有先去重：`frontend/src/components/RechargeView.jsx:597`、`frontend/src/components/RechargeView.jsx:271`。
-- Gmail 新增轮询使用没有请求互斥的 setInterval，慢响应可能重叠并覆盖新状态：`frontend/src/components/GmailInboxView.jsx:118`。
-- 健康检查只访问 `/api/auth/check`，不能代表数据库可写或守护正常；Docker 在已有 `static/index.html` 时跳过重建。当前产物本次哈希比对一致，但未来构建仍有使用旧资源风险。
-- Gmail Pub/Sub 验证参数可能进入访问日志，watch 续期与部署配置链需要专项验收；不能仅以端点存在认定推送完整。
-- 未见明确的数据库一致性备份、恢复演练和版本升级流程。当前相对 HEAD 的模型改动仅为历史字段显示名，未发现新增列迁移，因此不把“缺迁移框架”说成本次已经证实的表结构启动故障；未来新增表/升级仍须提供可复核迁移与恢复方案，可复用项目机制，不限定必须引入某框架。
-- 生产启动只检查 Gmail 密钥非空而未验证 Fernet 格式，文档示例需要避免让用户直接复制占位值；启动验收应验证格式且不输出秘密。
-- `docs/recharge-integration.md` 不存在；README 对完整交付、锁号阻止导出、守护归集等表述需改为与可验证能力一致。
-
-## 7. 功能完整性矩阵
-
-| 功能 | 当前判断 | 尚缺的上线闭环 |
-| --- | --- | --- |
-| 登录、账号 CRUD、批量导入、统计、基础导出 | 主流程已有实现与回归 | 部署密钥安全、锁号强制策略、敏感存储与审计 |
-| Googlemail 安全设置自动化 | 有模块、单元与界面测试 | 真实授权账号验证、低权限浏览器运行、生产任务生命周期 |
-| Gmail 收件箱与规则 | 有实现与离线测试 | HTTPS OAuth、必要权限、重复事件幂等、真实 Google 环境验证 |
-| 批量 OAuth | 部分实现 | 跨 worker state/任务共享、重启恢复、服务器回调配置 |
-| 安全中心与应急锁定 | 界面/服务存在但语义不完整 | 失败不报干净、锁定阻断敏感动作 |
-| 24H 收信守护与 OTP | 部分实现 | 持久生命周期、单实例、停止等待、游标/幂等/归集 |
-| 充值导航、四个 Tab、外观 | 已接入 | 无专属 UI 回归，缺模式和能力限制 |
-| 充值蓝图管理员会话鉴权 | 已核验 | 17 条接口匿名均 401；仍需独立 CSRF/业务认证 |
-| CDK/凭证验证与协议挑战 | 不完整 | 真正契约、失效规则、挑战核验与数据最小化 |
-| 创建/查询/撤回/关闭任务 | 不完整 | 真实结果、死锁修复、状态机、持久化、幂等和恢复 |
-| 账单与取消/恢复续费 | 不完整 | 禁止模拟成功、真实权限与结果核对 |
-| 发票与收据 | 不可用 | 路由、参数、运行时异常及真实文件链全部修复 |
-| Docker/原生生产部署 | 有骨架，不可直接放行 | 秘密隔离、配置必填、运行身份、支持期与实际容器验收 |
-
-## 8. 实际验证结果
-
-### 8.1 项目原有自动化
-
-| 检查 | 结果 | 备注 |
-| --- | --- | --- |
-| Python unittest discover | 70/70 通过 | 包含充值 6 项；有未关闭 SQLite 连接 ResourceWarning，不影响本次退出码 |
-| 根目录 Node 三文件测试 | 19/19 通过 | 账号导入、本地 Googlemail 与 API 基础行为 |
-| Googlemail Vitest | 47/47 通过 | 6 个测试文件，离线/mock |
-| Playwright 前端 UI 套件 | 20/20 通过 | 无充值交付完整流程用例 |
-| 合计 | 156/156 通过 | 不重复计入辅助审查运行的子集 |
-| Vite 生产构建 | 通过 | 输出到临时目录，未覆盖原 static |
-| 构建产物比对 | 全部一致 | index.html、JS、CSS 的 SHA-256 均与当前 static 一致 |
-| Python AST | 29 文件通过 | 不执行真实业务 |
-| Node ESM 语法 | 11 文件通过 | googlemail/src/*.mjs |
-| Bash 语法 | 通过 | 通过 Windows System32 bash 启动器运行 bash -n |
-| 充值匿名鉴权探针 | 17/17 返回 401 | csrf 路由不存在 |
-| Python pip check | 通过 | 只证明依赖一致性，不是漏洞扫描 |
-| Compose config --quiet | 通过 | version 字段有过时警告，不代表容器可运行 |
-| Docker 实际构建/运行 | 未验证 | Docker Desktop Linux Engine 命名管道不存在；且须先修复敏感构建上下文 |
-
-### 8.2 新增审计探针（不属于上述 156 项）
-
-使用临时内存应用与 Mock HTTP 得到以下实际结果：
-
-| 场景 | 观测结果 |
+| 变量 | 实际用途与约束 |
 | --- | --- |
-| 关闭上游，任意长度合格的假 CDK | 200 / valid |
-| 未签发 challenge、任意套餐、无 CSRF | 201 / processing |
-| 撤回不提供确认并使用错误邮箱 | 200 / recalled |
-| 撤回后重新提交 | 201，但仍为 recalled |
-| 已关闭卡密再次提交 | 新建 processing |
-| 新建后以卡密查询 | 仍返回旧 closed |
-| 直接 POST 下载任务发票 | NameError: datetime 未定义 |
-| 使用账单返回链接 GET 下载 | 405 |
-| validate 接口提交 JSON 数组 | AttributeError |
-| live 任务提交模拟超时 | 201 / processing，伪成功 |
-| live 取消续费模拟超时 | 200 / auto_renew=false，伪成功 |
-| 相同 live 创建请求发送两次 | 上游调用 2 次，无幂等 Header |
-| 未提交 CDK 查询 | 自锁，线程仍阻塞且共享锁被占用 |
-| production 使用模板默认密钥签发 Cookie | accounts 从 401 变 200，无需密码登录 |
+| `FLASK_ENV` | `development`、`production` 或 `testing`；systemd/Compose 生产设为 `production` |
+| `ADMIN_PASSWORD` | 非测试必填；production 至少 16 字符，不可含首尾空白或示例值 |
+| `SECRET_KEY` | production 必填，UTF-8 编码至少 32 字节，不可使用示例值；用于 session 和 challenge 绑定 |
+| `GMAIL_TOKEN_ENCRYPTION_KEY` | production 必填且必须可由 `cryptography.fernet.Fernet` 解析；所有实例一致并长期保存，同时是 Gmail/队列解密和 live 账单凭证 HMAC 的根密钥 |
+| `GMAIL_CLIENT_SECRET_FILE` | Google OAuth client JSON 路径；Compose 容器内默认 `/app/credentials.json` |
+| `GMAIL_REDIRECT_URI` | 可选，覆盖 Gmail OAuth 自动回调 URL |
+| `GMAIL_PUBSUB_TOPIC` | 首次创建或续租 Gmail watch 时必需的 Pub/Sub topic；未启用 watch 时可不配 |
+| `GMAIL_PUBSUB_VERIFICATION_TOKEN` | 启用 Pub/Sub webhook 时必填；query `token` 必须与它匹配，否则生产返回 401/503 |
+| `RECHARGE_MODE` | 默认 `disabled`；testing 为 `mock`；production 只允许 `disabled` 或 `live` |
+| `RECHARGE_UPSTREAM_URL` | live 充值 HTTP JSON 上游地址，非测试环境必须显式配置；未配置时不会回退到默认真实上游地址；鉴权方式未在仓库固定 |
+| `DATABASE_URL` | 可选 SQLAlchemy URI；未设置时使用 `instance/accounts.db` |
+| `TRUSTED_PROXY_CIDRS` | 只有来自这些网段的代理才会应用 `X-Forwarded-*`；Compose 默认 `172.30.8.1/32`，systemd 模板为 loopback |
+| `HEADLESS`、`PROXY` | Playwright 无头和代理选项，由部署/Node 子模块读取；它们不是 Flask `Config` 中的环境读取项 |
+| `GUNICORN_BIND`、`GUNICORN_WORKERS`、`GUNICORN_THREADS`、`GUNICORN_TIMEOUT`、`GUNICORN_LOG_LEVEL` | Gunicorn 绑定、并发和日志配置 |
 
-### 8.3 依赖安全与运行时
+不要把真实密钥写入仓库、镜像层或文档示例；Compose 使用 ${VAR:?message} 对三个核心密钥做必填检查。
 
-- 2026-09-18 执行 `npm audit --json`：frontend 报告 6 个受影响包项（4 high、2 moderate），googlemail 报告 4 个（1 high、3 moderate）。这不是“10 个独立 CVE”的统计。
-- 两个项目执行 `npm audit --omit=dev --json` 均为 0；本次告警集中在开发/构建/测试依赖，不能据此宣称生产运行依赖全部存在高危漏洞，也不能忽略构建链风险。
-- 本地没有 pip-audit，未完成 Python CVE 扫描；`pip check` 不替代它。未执行 audit fix 或任何依赖升级。
-- 本地为 Python 3.14.7、Node 22.23.2；Docker 模板为 Python 3.11、Node 20，当前测试不构成容器环境兼容性证明。
-- 官方 Node 发布页与 Release 日程确认 Node 20 的结束日期为 **2026-04-30**。审阅时 Node 22/24 仍在支持期；选定版本后仍需项目兼容验证。
-- 核验来源：`https://nodejs.org/en/about/previous-releases`；`https://raw.githubusercontent.com/nodejs/Release/main/schedule.json`。
+`RECHARGE_RATE_LIMIT_ENABLED`、`RECHARGE_RATE_LIMIT`、`BACKGROUND_TASK_MODE`、`AUTO_CREATE_DB`、`GOOGLEMAIL_EXECUTION_ENABLED` 和 `MAX_CONTENT_LENGTH` 是 `app/config.py` 中的代码配置常量或按配置类覆盖项，不会从环境变量直接读取；需要调整时应修改对应配置类并重新验证。
 
-### 8.4 可复核命令与日志
+### 4.2 依赖版本
+
+- Python 依赖由 `requirements.txt` 固定为 Flask 3.0.0、Flask-SQLAlchemy 3.1.1、Flask-CORS 4.0.0、SQLAlchemy 2.0.51、pyotp 2.9.0、python-dotenv 1.0.0、google-api-python-client 2.187.0、google-auth-httplib2 0.2.0、google-auth-oauthlib 1.2.2、cryptography 46.0.1；Docker 另外安装 `gunicorn==23.0.0`。
+- `googlemail/package.json` 固定 `otplib 13.4.1`、`playwright 1.60.0`，开发测试使用 `vitest 4.1.10`；Node engine 为 `>=20.19.0`。
+- `frontend/package.json` 使用 React/React DOM `^18.2.0`、Vite `^4.4.5`、Tailwind `^3.3.3`、`@vitejs/plugin-react ^4.0.3`、`lucide-react ^0.263.1` 等范围版本；生产构建输出到 `static/`。
+- `Dockerfile` 基于 `python:3.11-slim-bookworm`，安装 Node.js 20.x、Playwright Chromium，并以非 root `googlemanager`（UID/GID 10001）运行 Gunicorn。`deploy/setup-server.sh` 同样检查/安装 Node.js 20.x。
+- `npm audit --omit=dev` 对 frontend 和 googlemail 均报告 0 个生产依赖漏洞；完整审计仍报告 frontend 6 个开发/构建依赖告警（4 high、2 moderate）和 googlemail 4 个开发/测试依赖告警（1 high、3 moderate）。它们不进入当前生产依赖集合，但开发机或预览服务暴露时仍有风险，升级 Vite/PostCSS 与 Vitest 前必须单独做兼容性回归。
+
+## 5. 部署方式
+
+### 5.1 Docker Compose
+
+`docker-compose.yml` 定义三个服务：
+
+- `initialize` 使用 `python -m app.manage init-db`，成功后 `google-manager` 才启动；
+- `google-manager` 使用 Gunicorn，容器端口 8002 只绑定宿主 `127.0.0.1:8002`，挂载 `instance`、`googlemail/output`、`googlemail/runtime` 和只读 `credentials.json`；
+- `worker` 使用 `python -m app.worker`，依赖 web 服务启动，30 秒心跳检查使用 `python -m app.worker --check`。
+
+web/worker 共享相同环境变量和 SQLite 卷；Compose 已向各服务透传 `GMAIL_PUBSUB_TOPIC` 和 `GMAIL_PUBSUB_VERIFICATION_TOKEN`。Compose 健康检查使用 `/health/ready`；该端点在 queue 模式下要求 worker 心跳。镜像构建上下文由 `.dockerignore` 排除 `.env`、凭据、数据库、运行目录、依赖目录、测试和文档；秘密应在运行时注入。
+
+### 5.2 Linux systemd + Nginx
+
+`deploy/setup-server.sh` 在 Ubuntu/Debian 上安装 Python/Node 20.x、Playwright Chromium 和前端构建依赖，创建 `googlemanager` 专用用户，生成 0600 的 `.env`，并注册两个 systemd 单元：
+
+- `deploy/systemd/google-manager.service`：执行 `python -m app.manage init-db` 后启动 Gunicorn；
+- `deploy/systemd/google-manager-worker.service`：启动持久 worker，停止超时 60 秒；
+Nginx 配置文件由部署方手动安装；脚本不会安装 Nginx。手工配置可使用 `deploy/nginx/google-manager.conf`：80 重定向到 443，反代到 `127.0.0.1:8002`，设置 HTTPS、请求体上限 2M 和受信任转发头。
+
+安装脚本不会替用户生成 Google Cloud `credentials.json`；该文件必须由部署方安全放置并设置为 `googlemanager` 可读。Nginx 证书路径仍是模板中的 `/etc/letsencrypt/live/your-domain.com/...`，上线前必须替换域名并运行实际 TLS 验证。
+
+### 5.3 数据库初始化、备份和回滚
+
+生产 `AUTO_CREATE_DB=False`，必须显式执行 `python -m app.manage init-db`。该命令不是版本化迁移系统；已有数据库升级前应：
+
+```bash
+mkdir -p /secure/backup
+backup="/secure/backup/accounts-$(date +%Y%m%d-%H%M%S).db"
+python deploy/backup_database.py instance/accounts.db "$backup"
+python -m app.manage init-db
+# 启动 web/worker 服务后再执行以下两项检查
+python -m app.worker --check
+curl -f http://127.0.0.1:8002/health/ready
+```
+
+备份目标父目录必须已存在且目标文件不能已存在。脚本先创建 0600 目标文件，再执行 SQLite backup 和完整性检查；检查失败可能留下该目标文件。恢复时先停止 web/worker，将备份复制为数据库文件并重新执行健康检查。上述 Linux 命令尚未在本工作区执行，不能写成部署成功证据。
+
+## 6. 验证状态
+
+### 已执行且结果明确
+
+| 命令 | 结果 |
+| --- | --- |
+| `.\.venv\Scripts\python.exe -m pip check` | 通过：未发现破损依赖 |
+| `docker compose config --quiet` | 通过；当前 Compose 文件无解析错误或 `version` 废弃警告 |
+| `python -m unittest discover -s tests -p 'test_*.py'` | 通过：稳定代码快照 213 tests，退出码 0；存在既有 `datetime.utcnow()` DeprecationWarning 与 SQLite ResourceWarning |
+| `node --test tests/account-import.test.mjs tests/googlemail-local-copy.test.mjs tests/api-service.test.mjs` | 通过：41 tests |
+| `npm --prefix frontend run build` | 通过：Vite 生产构建输出到 `static/` |
+| `node --test tests/frontend-ui.test.mjs` | 通过：正式生产构建产物 43 tests；页面响应带 production CSP，API 使用 fixture |
+| `npm --prefix googlemail test` | 通过：6 files / 47 tests |
+| `npm --prefix frontend audit --omit=dev --json` | 通过：生产依赖 0 个漏洞；完整审计仍有 6 个开发/构建依赖告警 |
+| `npm --prefix googlemail audit --omit=dev --json` | 通过：生产依赖 0 个漏洞；完整审计仍有 4 个开发/测试依赖告警 |
+| `create_app('testing')` 路由枚举 | 成功加载 Flask 路由表 |
+| 源码/模型/配置静态核对 | 已完成；未使用真实凭证执行外部业务，未读取生产数据库或真实账号 |
+| `git -c core.whitespace=cr-at-eol diff --check` | 通过：未发现空白错误 |
+
+稳定代码快照共 344 项自动化测试通过（Python 213、根目录 Node.js 41、Googlemail 47、Playwright UI 43）。测试使用虚构凭证、临时数据库或隔离 fixture；Playwright 页面响应带 production CSP，但 API 由 fixture 提供。这些证据仍不覆盖真实上游、真实支付、Linux 部署或真实第三方服务。
+
+### 尚未形成可放行证据
+
+- Docker 镜像 build/run、Linux 部署和真实第三方服务仍未在本轮完成；本地 Windows 通过的测试不能替代这些验收证据。
+- Docker 镜像 build/run、Compose 三服务、systemd 启停、Nginx TLS、`/health/ready` worker 心跳、数据库恢复和跨进程重启尚未在 Linux 目标环境验证。
+- Google OAuth、Gmail Pub/Sub、真实上游充值、真实账单/发票、真实浏览器账号和容量/限流压测均未执行。
+
+推荐的本地验证命令：
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 node --test tests/account-import.test.mjs tests/googlemail-local-copy.test.mjs tests/api-service.test.mjs
 npm --prefix googlemail test
 node --test tests/frontend-ui.test.mjs
+npm --prefix frontend run build
 .\.venv\Scripts\python.exe -m pip check
 docker compose config --quiet
-docker version --format '{{.Server.Version}}'
-& "$env:SystemRoot\System32\bash.exe" -n deploy/setup-server.sh
-npm --prefix frontend audit --json
-npm --prefix googlemail audit --json
-npm --prefix frontend audit --omit=dev --json
-npm --prefix googlemail audit --omit=dev --json
 ```
 
-本次构建使用项目 build 入口，仅通过 `--outDir` 指向临时目录。UI 测试读取现有 static，已用哈希证明与本次新构建相同。
+## 7. 放行门槛
 
-审计日志目录：`C:\Users\www\AppData\Local\Temp\google-manager-audit-20260918-a3197bbb`。其中含各组测试输出、构建输出、`static-comparison.json`、`recharge-reproductions.json`、`production-auth-reproduction.json`、依赖审计和 Docker 可用性记录。该目录仅供本次核对，不作为生产持久证据库；日志不包含真实凭据。
+1. 在无外网的测试配置中，验证 disabled 返回 503、mock 不访问网络、live 异常保持 unknown、challenge/OAuth state 跨进程一次性消费、任务所有权失败关闭、账单 lease/CAS 和任务状态不被迟到响应覆盖。
+2. 使用获授权且可回滚的上游 sandbox，确认 URL、服务间鉴权、幂等键、任务号关联、取消/关闭语义、超时后的核对接口、KYC URL 处理和数据最小化；禁止用 mock 结果代替。
+3. 在 Linux 目标环境完成镜像构建和运行，确认非 root 权限、Playwright 浏览器路径、`credentials.json` 权限、web/worker 单实例、健康检查和日志脱敏。
+4. 完成 `accounts.db` 备份/恢复、`init-db` 前后两张新增表及账单 `lease_token` 核对、密钥轮换、Nginx HTTPS/OAuth 回调和数据库权限演练。Fernet key 轮换前必须用旧版本/旧密钥结清全部 `pending`/`unknown` 账单操作；若曾使用旧临时摘要算法或无 lease 列的中间版本，不得删除/重建表来绕过核对。
+5. 只有以上证据与对应回归退出码齐全，且用户明确批准真实操作后，才可从 No-Go 进入发布评审。
 
-## 9. 最小修复顺序与放行门槛
-
-1. **先阻断错误交付与秘密泄漏**：实现真正 disabled，移除 live 模拟回退、默认会话密钥及危险构建上下文；不得将“关闭上游”冒充关闭充值。
-2. **再修业务正确性**：解决锁死、challenge/输入契约、状态机、任务号查询、下载和前端失效规则；每个已复现问题先加回归测试。
-3. **完成可靠性与权限边界**：持久化操作记录、未知结果核对、幂等及多进程协调；CSRF、最小凭证、锁定策略、安全扫描错误态同步补齐。
-4. **修复生产链路**：OAuth HTTPS/重定向、浏览器安装路径、低权限运行、支持中的 Node LTS、守护生命周期、备份恢复与有效健康检查。
-5. **在预发布验收**：明确授权的上游测试资源逐项验证；Linux 镜像实际构建运行，跨 worker/重启/断网/限流/慢响应/重复提交/浏览器下载验证；执行备份恢复和密钥轮换演练。
-6. **最后放行**：P0/P1 关闭且有回归证据，未验证能力继续禁用，文档与代码相符。真实充值或订阅操作需独立确认，不能靠测试成功率替代业务验收。
-
-结论有效范围是本次工作区快照；后续修复需要复审。本报告不是对真实生产环境、第三方平台或所有潜在漏洞的安全保证。
+报告不对真实第三方平台、生产网络或所有潜在安全问题作保证；任何后续源码、配置或依赖变更都需要重新复核。

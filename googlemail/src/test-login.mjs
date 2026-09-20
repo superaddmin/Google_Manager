@@ -3,6 +3,7 @@ import { parseAccounts } from './account-parser.mjs';
 import { loginAndChange2FA } from './google-automator.mjs';
 import * as config from './config.mjs';
 import { maskEmail, redactSensitiveText } from './redaction.mjs';
+import { getBrowserLaunchOptions } from './browser-runtime.mjs';
 import fs from 'fs';
 
 const accounts = parseAccounts(config.ACCOUNTS_FILE);
@@ -71,7 +72,7 @@ process.on('SIGTERM', async () => {
 });
 
 try {
-  context = await chromium.launchPersistentContext(config.USER_DATA_DIR, {
+  context = await chromium.launchPersistentContext(config.USER_DATA_DIR, getBrowserLaunchOptions({
     headless: false,
     slowMo: 300,
     viewport: { width: 1280, height: 900 },
@@ -81,7 +82,7 @@ try {
       '--disable-features=TranslateUI',
       '--lang=zh-CN',
     ],
-  });
+  }));
 
   page = await context.newPage();
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' });

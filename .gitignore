@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.test-tmp/
+credentials.json
 
 # Flask runtime data
 instance/

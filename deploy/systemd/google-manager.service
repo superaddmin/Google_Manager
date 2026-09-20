@@ -6,8 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 # 建议以非 root 专用用户运行，如 www-data 或专门创建的 googlemanager
-User=root
-Group=root
+User=googlemanager
+Group=googlemanager
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
 
 # 工程根目录
 WorkingDirectory=/opt/google-manager
@@ -20,8 +23,10 @@ Environment=HEADLESS=true
 Environment=FLASK_ENV=production
 Environment=PYTHONUNBUFFERED=1
 Environment=PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+Environment=TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 
 # 启动命令：使用虚拟环境中的 gunicorn 加载配置
+ExecStartPre=/opt/google-manager/.venv/bin/python -m app.manage init-db
 ExecStart=/opt/google-manager/.venv/bin/gunicorn -c deploy/gunicorn.conf.py run:app
 
 # 进程异常自动重启

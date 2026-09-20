@@ -239,7 +239,12 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
             node_path="node-fixture",
             popen_factory=fake_popen,
         )
-        with patch.dict("os.environ", {"SECRET_KEY": "must-not-pass"}):
+        chrome_executable = str(self.project_root / "chrome" / "chrome")
+        with patch.dict("os.environ", {
+            "SECRET_KEY": "must-not-pass",
+            "FLASK_ENV": "production",
+            "GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH": chrome_executable,
+        }):
             task = manager.start_task(
                 self.app,
                 [account],
@@ -262,6 +267,11 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
         ):
             self.assertNotIn(sensitive_value, public_payload)
         self.assertNotIn("SECRET_KEY", captured_environment)
+        self.assertEqual(captured_environment["FLASK_ENV"], "production")
+        self.assertEqual(
+            captured_environment["GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH"],
+            chrome_executable,
+        )
         task_dir = self.project_root / "runtime" / "tasks" / task["taskId"]
         self.assertFalse((task_dir / "accounts.txt").exists())
         self.assertFalse((task_dir / "output" / "result.txt").exists())
@@ -301,11 +311,10 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
         db.session.commit()
 
         manager = GooglemailTaskManager(project_root=self.project_root)
-        with self.assertRaises(ValueError):
-            manager._sync_results(self.app, record)
+        self.assertEqual(manager._sync_results(self.app, record), 1)
 
         db.session.expire_all()
-        self.assertEqual(db.session.get(Account, first.id).secret, "JBSWY3DPEHPK3PXP")
+        self.assertEqual(db.session.get(Account, first.id).secret, "KRUGS4ZANFZSAYJA")
 
     def test_cancel_before_process_registration_terminates_process(self):
         account = self.create_account()

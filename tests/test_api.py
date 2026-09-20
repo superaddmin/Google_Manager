@@ -12,7 +12,9 @@ from app import create_app, db
 from app.config import ProductionConfig
 from app.models.account import Account
 from app.models.account_history import AccountHistory
-from app.services.auth_service import AuthService, login_attempts
+from app.services.auth_service import AuthService
+from app.models.request_limit import LoginAttempt
+from cryptography.fernet import Fernet
 from app.services.googlemail_service import googlemail_tasks
 
 
@@ -26,16 +28,18 @@ class ApiTestCase(unittest.TestCase):
         self.context.push()
         db.drop_all()
         db.create_all()
-        login_attempts.clear()
         self.client = self.app.test_client()
-        with self.client.session_transaction() as session:
-            session["authenticated"] = True
+        self.client.environ_base['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'
+        login = self.client.post(
+            "/api/auth/login",
+            json={"password": "admin123", "salt": self.current_salt()},
+        )
+        self.assertEqual(login.status_code, 200, login.get_json())
 
     def tearDown(self):
         db.drop_all()
         db.session.remove()
         db.engine.dispose()
-        login_attempts.clear()
         self.context.pop()
 
     @staticmethod
@@ -52,7 +56,7 @@ class ApiTestCase(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"SECRET_KEY": "x" * 32, "ADMIN_PASSWORD": "test-admin-password", "GMAIL_TOKEN_ENCRYPTION_KEY": "x" * 44},
+                {"SECRET_KEY": "x" * 32, "ADMIN_PASSWORD": "test-admin-password", "GMAIL_TOKEN_ENCRYPTION_KEY": Fernet.generate_key().decode()},
                 clear=True,
             ),
             patch.object(
@@ -108,6 +112,7 @@ class ApiTestCase(unittest.TestCase):
 
     def test_account_api_requires_login_and_logout_clears_session(self):
         anonymous = self.app.test_client()
+        anonymous.environ_base['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'
         self.assertEqual(anonymous.get("/api/accounts").status_code, 401)
 
         login = anonymous.post(
@@ -137,7 +142,7 @@ class ApiTestCase(unittest.TestCase):
             headers=headers,
         )
         self.assertEqual(failed.status_code, 401)
-        self.assertEqual(login_attempts["127.0.0.1"]["attempts"], 1)
+        self.assertEqual(db.session.get(LoginAttempt, "127.0.0.1").attempts, 1)
 
         success = self.client.post(
             "/api/auth/login",
@@ -146,7 +151,7 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(success.status_code, 200)
         self.assertTrue(success.get_json()["success"])
-        self.assertEqual(login_attempts["127.0.0.1"]["attempts"], 0)
+        self.assertEqual(db.session.get(LoginAttempt, "127.0.0.1").attempts, 0)
 
     def test_third_failed_login_bans_ip(self):
         headers = {"X-Forwarded-For": "192.0.2.20"}
@@ -241,6 +246,7 @@ class ApiTestCase(unittest.TestCase):
 
     def test_forwarded_headers_cannot_bypass_login_ban(self):
         anonymous = self.app.test_client()
+        anonymous.environ_base['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'
         for index, expected_status in enumerate((401, 401, 403, 403)):
             response = anonymous.post(
                 "/api/auth/login",
@@ -248,7 +254,7 @@ class ApiTestCase(unittest.TestCase):
                 headers={"X-Forwarded-For": f"192.0.2.{index + 1}"},
             )
             self.assertEqual(response.status_code, expected_status)
-        self.assertEqual(set(login_attempts), {"127.0.0.1"})
+        self.assertEqual({record.ip for record in LoginAttempt.query.all()}, {"127.0.0.1"})
 
     def test_optional_account_fields_reject_non_string_values(self):
         account = self.create_account()

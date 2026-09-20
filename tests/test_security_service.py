@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from app import create_app, db
+from tests.auth_helpers import login_admin
 from app.models.account import Account
 from app.models.account_history import AccountHistory
 from app.models.gmail_connection import GmailConnection
@@ -16,8 +17,8 @@ class SecurityServiceTestCase(unittest.TestCase):
         db.drop_all()
         db.create_all()
         self.client = self.app.test_client()
-        with self.client.session_transaction() as session:
-            session['authenticated'] = True
+        self.client.environ_base['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'
+        login_admin(self.client)
 
     def tearDown(self):
         db.session.remove()

@@ -1,16 +1,16 @@
-version: '3.8'
-
 services:
   google-manager:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: google-manager:latest
+    image: &application-image ${GOOGLE_MANAGER_IMAGE:?GOOGLE_MANAGER_IMAGE 必须指定已验收的不可变镜像}
     container_name: google-manager
     restart: unless-stopped
     ports:
       - "127.0.0.1:8002:8002"
-    environment:
+    init: true
+    stop_grace_period: 60s
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    environment: &application-environment
       # 生产环境模式
       - FLASK_ENV=production
       # 管理员面板登录密码（必填，禁止使用默认占位值）
@@ -22,17 +22,31 @@ services:
       # 充值功能模式（disabled: 禁用, mock: 模拟演示, live: 官方生产履约）
       - RECHARGE_MODE=${RECHARGE_MODE:-disabled}
       # 充值上游服务 API 地址
-      - RECHARGE_UPSTREAM_URL=${RECHARGE_UPSTREAM_URL:-https://aichong666.com/api}
+      - RECHARGE_UPSTREAM_URL=${RECHARGE_UPSTREAM_URL:-}
+      # live 模式上游主机白名单
+      - RECHARGE_UPSTREAM_ALLOWED_HOSTS=${RECHARGE_UPSTREAM_ALLOWED_HOSTS:-aichong666.com}
+      # 可选外部数据库；未设置时使用持久化 SQLite
+      - DATABASE_URL=${DATABASE_URL:-}
       # Google API 客户端凭据文件容器内路径
       - GMAIL_CLIENT_SECRET_FILE=/app/credentials.json
       # 可选公网反向代理回调链接（如配置域名，例如 https://gmail.yourdomain.com/api/gmail/oauth/callback）
       - GMAIL_REDIRECT_URI=${GMAIL_REDIRECT_URI:-}
-      # 住宅代理服务（必填，部署在海外机房 VPS 上时防 Google 机器人拦截）
+      # Gmail Pub/Sub（启用 watch/webhook 时配置）
+      - GMAIL_PUBSUB_TOPIC=${GMAIL_PUBSUB_TOPIC:-}
+      - GMAIL_PUBSUB_VERIFICATION_TOKEN=${GMAIL_PUBSUB_VERIFICATION_TOKEN:-}
+      # 可选代理服务；可用性及目标服务访问许可需单独验收
       # 例如: http://username:password@proxy.example.com:8080
       - PROXY=${PROXY:-}
       # Playwright 模式
       - HEADLESS=true
-    volumes:
+      - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-172.30.8.1/32}
+      # Gunicorn 可调并发与超时
+      - GUNICORN_BIND=${GUNICORN_BIND:-0.0.0.0:8002}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
+      - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
+      - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
+      - GUNICORN_LOG_LEVEL=${GUNICORN_LOG_LEVEL:-info}
+    volumes: &application-volumes
       # 持久化 SQLite 数据库文件
       - ./instance:/app/instance
       # 持久化自动化任务日志与截图
@@ -42,7 +56,7 @@ services:
       # 挂载 Google 客户端密钥配置
       - ./credentials.json:/app/credentials.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8002/api/auth/check || exit 1"]
+      test: ["CMD", "python", "-c", "from app.monitor import probe_readiness; raise SystemExit(0 if probe_readiness('http://127.0.0.1:8002/health/ready') else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -52,3 +66,39 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
+
+  initialize:
+    image: *application-image
+    command: ["python", "-m", "app.manage", "init-db"]
+    restart: "no"
+    environment: *application-environment
+    volumes: *application-volumes
+
+  worker:
+    image: *application-image
+    command: ["python", "-m", "app.worker"]
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    environment: *application-environment
+    volumes: *application-volumes
+    depends_on:
+      google-manager:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.8.0/24
+          gateway: 172.30.8.1

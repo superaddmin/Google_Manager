@@ -459,6 +459,12 @@ class SecurityService:
         )
         db.session.add(reason_history)
         db.session.commit()
+        from app.services.runtime_queue import RuntimeQueue
+        from app.services.googlemail_service import googlemail_tasks
+        from app.services.batch_oauth_service import batch_oauth_manager
+        RuntimeQueue.cancel_for_account(account_id)
+        googlemail_tasks.cancel_for_account(account_id)
+        batch_oauth_manager.cancel_for_account(account_id)
         return account
 
     @classmethod

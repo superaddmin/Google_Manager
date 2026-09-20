@@ -1,10 +1,13 @@
 """Gmail 规则管理、执行和人工确认服务。"""
 import json
+import time
+import uuid
 from datetime import datetime, timezone
 
 from app import db
 from app.models.gmail_rule import GmailRule
 from app.models.gmail_task_log import GmailActionConfirmation, GmailTaskLog
+from app.models.gmail_execution import GmailExecution
 from app.services.gmail_service import GmailService
 
 
@@ -157,12 +160,19 @@ class GmailRuleService:
         if message_ids is not None:
             candidates = list(dict.fromkeys(message_ids))[:max_messages]
             if rule.search_query:
-                matching = GmailService.list_messages(
-                    connection,
-                    query=rule.search_query,
-                    max_results=max_messages,
-                )['messages']
-                allowed_ids = {message['id'] for message in matching}
+                allowed_ids = set()
+                page_token = None
+                seen_tokens = set()
+                while True:
+                    response = GmailService.list_messages(connection, query=rule.search_query,
+                                                          max_results=100, page_token=page_token)
+                    allowed_ids.update(message['id'] for message in response['messages'])
+                    page_token = response.get('nextPageToken')
+                    if not page_token or set(candidates).issubset(allowed_ids):
+                        break
+                    if page_token in seen_tokens:
+                        raise GmailRuleServiceError('Gmail 查询分页异常')
+                    seen_tokens.add(page_token)
                 candidates = [message_id for message_id in candidates if message_id in allowed_ids]
             return candidates
         return [
@@ -176,6 +186,8 @@ class GmailRuleService:
 
     @classmethod
     def _create_log(cls, connection, rule, message_id, actions, status):
+        if status != 'dry_run':
+            return GmailExecution.acquire(connection, rule, message_id, actions, status)
         log = GmailTaskLog(
             connection_id=connection.id,
             rule_id=rule.id,
@@ -204,6 +216,9 @@ class GmailRuleService:
                 candidate_ids = cls._message_ids_for_rule(connection, rule, message_ids, max_messages)
             except Exception as error:
                 log = cls._create_log(connection, rule, '*', actions, 'failed')
+                if log is None:
+                    summary['failed'] += 1
+                    continue
                 log.error_message = str(error)[:500]
                 log.completed_at = cls._utc_now()
                 db.session.commit()
@@ -217,6 +232,8 @@ class GmailRuleService:
                     'pending_confirmation' if rule.requires_confirmation else 'running'
                 )
                 log = cls._create_log(connection, rule, message_id, actions, status)
+                if log is None:
+                    continue
                 if dry_run:
                     log.result_data = cls._dump({'dryRun': True})
                     log.completed_at = cls._utc_now()
@@ -224,8 +241,6 @@ class GmailRuleService:
                     summary['logs'].append(log.to_dict())
                     continue
                 if rule.requires_confirmation:
-                    db.session.add(GmailActionConfirmation(task_log_id=log.id))
-                    db.session.commit()
                     summary['pendingConfirmation'] += 1
                     summary['logs'].append(log.to_dict())
                     continue
@@ -259,6 +274,61 @@ class GmailRuleService:
             query = query.filter_by(status=status)
         return query.limit(limit).all()
 
+    @classmethod
+    def retry_due_actions(cls):
+        now = time.time()
+        records = GmailExecution.query.join(GmailTaskLog, GmailExecution.log_id == GmailTaskLog.id).join(
+            GmailRule, GmailTaskLog.rule_id == GmailRule.id,
+        ).filter(
+            GmailExecution.lease_until <= now, GmailTaskLog.status.in_(('failed', 'running')),
+            GmailTaskLog.message_id != '*', GmailRule.enabled.is_(True),
+        ).order_by(GmailExecution.lease_until).limit(20).all()
+        summary = {'succeeded': 0, 'failed': 0, 'pendingConfirmation': 0}
+        for record in records:
+            old_token = record.lease_token
+            new_token = uuid.uuid4().hex
+            claimed = GmailTaskLog.query.filter(
+                GmailTaskLog.id == record.log_id, GmailTaskLog.status.in_(('failed', 'running')),
+                GmailExecution.query.filter_by(key=record.key, lease_token=old_token).filter(
+                    GmailExecution.lease_until <= now,
+                ).exists(),
+            ).update({'status': 'running', 'error_message': None, 'completed_at': None}, synchronize_session=False)
+            renewed = GmailExecution.query.filter_by(key=record.key, lease_token=old_token).filter(
+                GmailExecution.lease_until <= now,
+            ).update({'lease_until': time.time() + 300, 'lease_token': new_token}, synchronize_session=False)
+            if claimed != 1 or renewed != 1:
+                db.session.rollback()
+                continue
+            db.session.commit()
+            log = db.session.get(GmailTaskLog, record.log_id)
+            try:
+                actions = json.loads(log.request_data)
+                result = GmailService.modify_message(log.connection, log.message_id,
+                                                     add=actions.get('addLabelIds', []),
+                                                     remove=actions.get('removeLabelIds', []))
+            except Exception as error:
+                db.session.rollback()
+                changed = GmailTaskLog.query.filter_by(id=record.log_id, status='running').filter(
+                    GmailExecution.query.filter_by(key=record.key, lease_token=new_token).exists(),
+                ).update({'status': 'failed', 'error_message': type(error).__name__,
+                          'completed_at': cls._utc_now()}, synchronize_session=False)
+                if changed:
+                    summary['failed'] += 1
+                    db.session.commit()
+                else:
+                    db.session.rollback()
+                continue
+            changed = GmailTaskLog.query.filter_by(id=record.log_id, status='running').filter(
+                GmailExecution.query.filter_by(key=record.key, lease_token=new_token).exists(),
+            ).update({'status': 'succeeded', 'result_data': cls._dump(result),
+                      'completed_at': cls._utc_now()}, synchronize_session=False)
+            if changed:
+                summary['succeeded'] += 1
+                db.session.commit()
+            else:
+                db.session.rollback()
+        return summary
+
     @staticmethod
     def get_log(log_id):
         return db.session.get(GmailTaskLog, log_id)
@@ -269,6 +339,19 @@ class GmailRuleService:
             raise GmailRuleServiceError('该任务不在待确认状态')
         if not isinstance(reviewer, str) or not reviewer.strip():
             raise GmailRuleServiceError('缺少确认人')
+        token = uuid.uuid4().hex
+        claimed = GmailTaskLog.query.filter_by(id=log.id, status='pending_confirmation').update(
+            {'status': 'confirming'}, synchronize_session=False)
+        if claimed:
+            renewed = GmailExecution.query.filter_by(log_id=log.id).update({
+                'lease_until': time.time() + 300, 'lease_token': token,
+            })
+        else:
+            renewed = 0
+        db.session.commit()
+        if claimed != 1 or renewed != 1:
+            raise GmailRuleServiceError('该任务已被其他请求处理')
+        log = db.session.get(GmailTaskLog, log.id)
         try:
             actions = json.loads(log.request_data or '{}')
             result = GmailService.modify_message(
@@ -277,25 +360,34 @@ class GmailRuleService:
                 add=actions.get('addLabelIds', []),
                 remove=actions.get('removeLabelIds', []),
             )
-            log.status = 'succeeded'
-            log.result_data = cls._dump(result)
+            changed = GmailTaskLog.query.filter_by(id=log.id, status='confirming').filter(
+                GmailExecution.query.filter_by(log_id=log.id, lease_token=token).exists(),
+            ).update({'status': 'succeeded', 'result_data': cls._dump(result),
+                      'completed_at': cls._utc_now()}, synchronize_session=False)
+            if changed != 1:
+                db.session.rollback()
+                raise GmailRuleServiceError('该任务执行租约已失效，请重新确认')
+            log = db.session.get(GmailTaskLog, log.id)
             log.confirmation.status = 'approved'
             log.confirmation.reviewer = reviewer.strip()[:100]
             log.confirmation.note = note.strip()[:500] if isinstance(note, str) and note.strip() else None
             log.confirmation.reviewed_at = cls._utc_now()
-            log.completed_at = cls._utc_now()
             db.session.commit()
             return log
         except Exception as error:
             db.session.rollback()
-            log = db.session.get(GmailTaskLog, log.id)
-            log.status = 'failed'
-            log.error_message = str(error)[:500]
-            log.confirmation.status = 'approved'
-            log.confirmation.reviewer = reviewer.strip()[:100]
-            log.confirmation.reviewed_at = cls._utc_now()
-            log.completed_at = cls._utc_now()
-            db.session.commit()
+            changed = GmailTaskLog.query.filter_by(id=log.id, status='confirming').filter(
+                GmailExecution.query.filter_by(log_id=log.id, lease_token=token).exists(),
+            ).update({'status': 'pending_confirmation', 'error_message': str(error)[:500],
+                      'completed_at': None}, synchronize_session=False)
+            if changed:
+                log = db.session.get(GmailTaskLog, log.id)
+                log.confirmation.status = 'pending'
+                log.confirmation.reviewer = None
+                log.confirmation.reviewed_at = None
+                db.session.commit()
+            else:
+                db.session.rollback()
             raise GmailRuleServiceError('确认后的 Gmail 动作执行失败') from error
 
     @classmethod
@@ -304,7 +396,12 @@ class GmailRuleService:
             raise GmailRuleServiceError('该任务不在待确认状态')
         if not isinstance(reviewer, str) or not reviewer.strip():
             raise GmailRuleServiceError('缺少确认人')
-        log.status = 'rejected'
+        claimed = GmailTaskLog.query.filter_by(id=log.id, status='pending_confirmation').update(
+            {'status': 'rejected'}, synchronize_session=False)
+        if claimed != 1:
+            db.session.rollback()
+            raise GmailRuleServiceError('该任务已被其他请求处理')
+        db.session.refresh(log)
         log.confirmation.status = 'rejected'
         log.confirmation.reviewer = reviewer.strip()[:100]
         log.confirmation.note = note.strip()[:500] if isinstance(note, str) and note.strip() else None

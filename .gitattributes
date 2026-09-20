@@ -1,0 +1,5 @@
+# Linux deployment files must remain executable/parseable after Windows checkouts.
+*.sh text eol=lf
+Dockerfile text eol=lf
+deploy/systemd/*.service text eol=lf
+deploy/nginx/*.conf text eol=lf

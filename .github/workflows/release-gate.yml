@@ -1,0 +1,264 @@
+name: Release gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 24.21.0
+  PYTHON_VERSION: '3.11'
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+jobs:
+  tests:
+    name: Tests and production build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            googlemail/package-lock.json
+
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          npm --prefix frontend ci
+          npm --prefix googlemail ci
+          ./googlemail/node_modules/.bin/playwright install-deps chromium
+          python deploy/install_browser.py --platform linux/amd64 \
+            --destination "$RUNNER_TEMP/google-manager-chrome"
+
+      - name: Validate Python and Node sources
+        run: |
+          python -m compileall -q app deploy run.py
+          node --check googlemail/src/main.mjs
+          node --check googlemail/src/batch-oauth-worker.mjs
+          node --check googlemail/src/oauth-authorizer.mjs
+          node --check googlemail/src/browser-runtime.mjs
+
+      - name: Verify pinned browser with both launch APIs
+        env:
+          FLASK_ENV: production
+          GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH: ${{ runner.temp }}/google-manager-chrome/chrome
+        run: node googlemail/src/startup-check.mjs
+
+      - name: Run Python tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Run shared Node tests
+        run: node --test tests/account-import.test.mjs tests/googlemail-local-copy.test.mjs tests/api-service.test.mjs
+
+      - name: Enforce Googlemail coverage threshold
+        run: npm --prefix googlemail run test:coverage
+
+      - name: Build frontend
+        run: npm --prefix frontend run build
+
+      - name: Run built frontend integration tests
+        env:
+          FLASK_ENV: production
+          GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH: ${{ runner.temp }}/google-manager-chrome/chrome
+        run: node --test tests/frontend-ui.test.mjs
+
+  dependency-audit:
+    name: Dependency and repository audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Audit Python requirements
+        run: |
+          python -m pip install --disable-pip-version-check pip-audit==2.9.0
+          python -m pip_audit -r requirements.txt --strict
+
+      - name: Audit all npm dependencies
+        shell: bash
+        run: |
+          set +e
+          npm --prefix frontend audit --audit-level=high
+          frontend_status=$?
+          npm --prefix googlemail audit --audit-level=high
+          googlemail_status=$?
+          set -e
+          if (( frontend_status != 0 || googlemail_status != 0 )); then
+            echo 'High or critical npm advisories block release.' >&2
+            exit 1
+          fi
+
+      - name: Scan repository for secrets and misconfiguration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false
+
+  container:
+    name: Production image, SBOM, and vulnerability scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build immutable production image
+        id: image-build
+        run: |
+          docker buildx build \
+            --pull \
+            --load \
+            --metadata-file build-metadata.json \
+            --tag google-manager:ci \
+            .
+
+      - name: Verify runtime contents and versions
+        run: |
+          docker run --rm google-manager:ci sh -euc '
+            test "$(id -u)" = "10001"
+            test "$(node --version)" = "v24.21.0"
+            python --version
+            test -f /app/static/index.html
+            test -d /app/googlemail/node_modules/playwright
+            test ! -e /app/googlemail/node_modules/vitest
+            test ! -e /app/frontend
+          '
+          docker run --rm --init --network none google-manager:ci node googlemail/src/startup-check.mjs
+
+      - name: Validate Compose configuration
+        env:
+          ADMIN_PASSWORD: ci-only-password-value
+          SECRET_KEY: ci-only-secret-key-value-at-least-32-characters
+          GMAIL_TOKEN_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+          RECHARGE_MODE: disabled
+          GOOGLE_MANAGER_IMAGE: google-manager:ci
+        run: docker compose --env-file /dev/null config --quiet
+
+      - name: Smoke test application and worker entrypoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          volume_name="google-manager-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container_id=''
+          worker_id=''
+          cleanup() {
+            if [[ -n "$container_id" ]]; then docker rm --force "$container_id" >/dev/null 2>&1 || true; fi
+            if [[ -n "$worker_id" ]]; then docker rm --force "$worker_id" >/dev/null 2>&1 || true; fi
+            docker volume rm "$volume_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$volume_name" >/dev/null
+          common_env=(
+            -e ADMIN_PASSWORD=ci-only-password-value
+            -e SECRET_KEY=ci-only-secret-key-value-at-least-32-characters
+            -e GMAIL_TOKEN_ENCRYPTION_KEY=MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+            -e RECHARGE_MODE=disabled
+          )
+          docker run --rm "${common_env[@]}" -v "$volume_name:/app/instance" \
+            google-manager:ci python -m app.manage init-db
+          container_id=$(docker run --detach "${common_env[@]}" -v "$volume_name:/app/instance" google-manager:ci)
+          worker_id=$(docker run --detach "${common_env[@]}" -v "$volume_name:/app/instance" \
+            google-manager:ci python -m app.worker)
+          for attempt in {1..30}; do
+            if docker exec "$container_id" python -c "from app.monitor import probe_readiness; raise SystemExit(0 if probe_readiness('http://127.0.0.1:8002/health/ready') else 1)" \
+              && docker exec "$worker_id" python -m app.worker --check; then
+              break
+            fi
+            if (( attempt == 30 )); then
+              docker logs "$container_id"
+              docker logs "$worker_id"
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec "$container_id" python -m app.monitor --min-free-mib 1
+
+      - name: Scan production image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: google-manager:ci
+          scanners: vuln
+          format: json
+          output: image-vulnerabilities.json
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false
+
+      - name: Verify deployment tooling and private runtime files in the image
+        if: ${{ always() && steps.image-build.outcome == 'success' }}
+        run: |
+          docker run --rm --network none \
+            --mount type=bind,source="$GITHUB_WORKSPACE/tests",target=/app/tests,readonly \
+            google-manager:ci python -m unittest \
+            tests.test_deployment_preflight tests.test_compose_release \
+            tests.test_recovery_drill tests.test_container_permissions \
+            tests.test_browser_artifacts
+
+      - name: Exercise isolated recovery with the production image
+        if: ${{ always() && steps.image-build.outcome == 'success' }}
+        run: |
+          docker run --rm --network none google-manager:ci \
+            python -m deploy.recovery_drill > recovery-drill.json
+
+      - name: Generate CycloneDX SBOM
+        if: ${{ always() && steps.image-build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: google-manager:ci
+          scanners: vuln
+          format: cyclonedx
+          output: google-manager-sbom.cdx.json
+
+      - name: Preserve build evidence
+        if: ${{ always() && steps.image-build.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: google-manager-build-evidence
+          path: |
+            build-metadata.json
+            image-vulnerabilities.json
+            google-manager-sbom.cdx.json
+            recovery-drill.json
+          if-no-files-found: error
+          retention-days: 30

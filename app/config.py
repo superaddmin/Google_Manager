@@ -19,13 +19,23 @@ class Config:
     SESSION_COOKIE_SAMESITE = 'Lax'
     GOOGLEMAIL_EXECUTION_ENABLED = True
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    TRUSTED_PROXY_CIDRS = os.environ.get('TRUSTED_PROXY_CIDRS', '')
+    RECHARGE_RATE_LIMIT_ENABLED = True
+    RECHARGE_RATE_LIMIT = 60
+    MAX_CONTENT_LENGTH = 2 * 1024 * 1024
+    BACKGROUND_TASK_MODE = 'queue'
+    AUTO_CREATE_DB = True
     GMAIL_CLIENT_SECRET_FILE = os.environ.get('GMAIL_CLIENT_SECRET_FILE')
     GMAIL_TOKEN_ENCRYPTION_KEY = os.environ.get('GMAIL_TOKEN_ENCRYPTION_KEY')
+    SENSITIVE_DATA_REQUIRE_ENCRYPTION = False
     GMAIL_PUBSUB_TOPIC = os.environ.get('GMAIL_PUBSUB_TOPIC')
     GMAIL_PUBSUB_VERIFICATION_TOKEN = os.environ.get('GMAIL_PUBSUB_VERIFICATION_TOKEN')
     GMAIL_REDIRECT_URI = os.environ.get('GMAIL_REDIRECT_URI')
     RECHARGE_MODE = os.environ.get('RECHARGE_MODE', 'disabled').lower()
     RECHARGE_UPSTREAM_URL = os.environ.get('RECHARGE_UPSTREAM_URL', 'https://aichong666.com/api')
+    RECHARGE_UPSTREAM_ALLOWED_HOSTS = os.environ.get(
+        'RECHARGE_UPSTREAM_ALLOWED_HOSTS', 'aichong666.com'
+    )
     
     # 数据库配置
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
@@ -43,6 +53,8 @@ class ProductionConfig(Config):
     DEBUG = False
     SECRET_KEY = os.environ.get('SECRET_KEY')
     SESSION_COOKIE_SECURE = True
+    AUTO_CREATE_DB = False
+    SENSITIVE_DATA_REQUIRE_ENCRYPTION = True
     
 
 class TestingConfig(Config):
@@ -52,6 +64,8 @@ class TestingConfig(Config):
     GOOGLEMAIL_EXECUTION_ENABLED = False
     SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
     RECHARGE_MODE = 'mock'
+    RECHARGE_RATE_LIMIT = 10000
+    BACKGROUND_TASK_MODE = 'inline'
 
 
 # 配置映射

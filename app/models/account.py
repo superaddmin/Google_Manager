@@ -4,6 +4,7 @@
 """
 from datetime import datetime, timezone
 from app import db
+from app.services.field_encryption import EncryptedText
 
 
 def utc_now():
@@ -31,9 +32,9 @@ class Account(db.Model):
     
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     email = db.Column(db.String(255), unique=True, nullable=False, index=True)
-    password = db.Column(db.String(255), nullable=False)
-    recovery = db.Column(db.String(255), nullable=True)
-    secret = db.Column(db.String(64), nullable=True)
+    password = db.Column(EncryptedText(), nullable=False)
+    recovery = db.Column(EncryptedText(), nullable=True)
+    secret = db.Column(EncryptedText(), nullable=True)
     remark = db.Column(db.String(255), nullable=True)
     status = db.Column(db.String(20), default='inactive')
     sold_status = db.Column(db.String(20), default='unsold')  # 出售状态: sold/unsold
@@ -50,9 +51,9 @@ class Account(db.Model):
         return {
             'id': self.id,
             'email': self.email,
-            'password': self.password,
-            'recovery': self.recovery or '',
-            'secret': self.secret or '',
+            'password': '' if self.status == 'locked' else self.password,
+            'recovery': '' if self.status == 'locked' else self.recovery or '',
+            'secret': '' if self.status == 'locked' else self.secret or '',
             'remark': self.remark or '',
             'status': self.status,
             'soldStatus': self.sold_status or 'unsold',

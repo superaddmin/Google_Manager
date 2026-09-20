@@ -15,6 +15,17 @@ EMAIL_PATTERN = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 MAX_BATCH_IMPORT_SIZE = 500
 
 
+def cancel_account_automation(account_id):
+    """在删除账号前持久取消其待执行和运行中的自动化任务。"""
+    from app.services.batch_oauth_service import batch_oauth_manager
+    from app.services.googlemail_service import googlemail_tasks
+    from app.services.runtime_queue import RuntimeQueue
+
+    RuntimeQueue.cancel_for_account(account_id)
+    googlemail_tasks.cancel_for_account(account_id)
+    batch_oauth_manager.cancel_for_account(account_id)
+
+
 def normalize_account_data(data, require_all=False):
     """验证必填字段并规范化账号数据。"""
     if not isinstance(data, dict):
@@ -188,6 +199,7 @@ class AccountService:
         """
         accounts, missing_ids = AccountService._fetch_accounts_by_ids(account_ids)
         for account in accounts:
+            cancel_account_automation(account.id)
             db.session.delete(account)
         db.session.commit()
         return {
@@ -381,7 +393,7 @@ class AccountService:
         }
     
     @staticmethod
-    def update_account(account_id, data, commit=True):
+    def update_account(account_id, data, commit=True, automation_result=False):
         """
         更新账号信息
         
@@ -399,7 +411,9 @@ class AccountService:
         data = normalize_account_data(data)
         
         # 应急锁定状态保护
-        if account.status == 'locked' and ('status' in data or 'password' in data or 'secret' in data):
+        if automation_result and not set(data).issubset({'secret', 'recovery'}):
+            raise ValueError('自动化结果仅允许保存已发生的密钥和恢复邮箱变更')
+        if account.status == 'locked' and not automation_result and ('status' in data or 'password' in data or 'secret' in data):
             raise ValueError('账号处于应急锁定状态，禁止修改状态或敏感凭据')
 
         # 如果更新邮箱，检查是否与其他账号冲突
@@ -417,8 +431,8 @@ class AccountService:
                 history = AccountHistory(
                     account_id=account_id,
                     field_name='password',
-                    old_value=account.password,
-                    new_value=data['password']
+                    old_value='[已隐藏]',
+                    new_value='[已更新]'
                 )
                 db.session.add(history)
             account.password = data['password']
@@ -439,8 +453,8 @@ class AccountService:
                 history = AccountHistory(
                     account_id=account_id,
                     field_name='secret',
-                    old_value=account.secret,
-                    new_value=data['secret']
+                    old_value='[已隐藏]',
+                    new_value='[已更新]'
                 )
                 db.session.add(history)
             account.secret = data['secret']
@@ -467,7 +481,7 @@ class AccountService:
         account = db.session.get(Account, account_id)
         if not account:
             return False
-        
+        cancel_account_automation(account.id)
         db.session.delete(account)
         db.session.commit()
         return True

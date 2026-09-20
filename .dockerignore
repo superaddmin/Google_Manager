@@ -3,6 +3,8 @@
 .env*
 *.env
 credentials.json
+**/client_secret*.json
+**/*credentials*.json
 token*.json
 *.pem
 *.key
@@ -17,6 +19,12 @@ __pycache__
 *.pyo
 *.pyd
 .pytest_cache
+.test-tmp
+.agents
+.codex
+.github
+.playwright-cli
+.playwright-mcp
 node_modules
 frontend/node_modules
 frontend/dist
@@ -24,6 +32,12 @@ googlemail/node_modules
 googlemail/browser-data
 googlemail/output
 googlemail/runtime
+googlemail/*.txt
+googlemail/test-temp-*
+googlemail/playwright-report
+googlemail/test-results
+googlemail/coverage
+*.log
 tests
 docs
 .DS_Store

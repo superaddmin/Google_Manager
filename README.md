@@ -63,10 +63,10 @@ https://github.com/superaddmin/Google_Manager.git
 
 ### 🔒 核心防御与安全机制
 
-- **管理员密码鉴权** - 所有 API 端点与管理界面均受服务端会话保护。
+- **管理员密码鉴权** - 管理端 API 与管理界面受可吊销的服务端会话保护；面向客户的 CDK 创建/查询接口按独立契约开放。
 - **防暴力破解 IP 封禁** - 连续 3 次输入错误密码，自动封禁该来源 IP 24 小时。
 - **短时效动态盐值校验** - 登录请求携带时间戳动态盐值校验。
-- **凭证强加密存储** - Gmail API 凭证强制要求配置 `GMAIL_TOKEN_ENCRYPTION_KEY` 采用 Fernet 对称强加密落盘。
+- **凭证强加密存储** - Gmail API 凭证强制要求配置 `GMAIL_TOKEN_ENCRYPTION_KEY` 采用 Fernet 对称强加密落盘；该长期密钥同时派生 live 账单操作的凭证摘要键，因此所有实例必须保持一致，轮换前必须先结清 `pending`/`unknown` 操作。
 
 ***
 
@@ -82,7 +82,9 @@ Google_Manager/
 │   │   ├── gmail_rule.py             # 自动化规则模型
 │   │   ├── gmail_task_log.py         # 规则执行日志与人工审核模型
 │   │   ├── gmail_watch.py            # Gmail Pub/Sub 订阅模型
-│   │   └── googlemail_task.py        # Playwright 任务状态模型
+│   │   ├── googlemail_task.py        # Playwright 任务状态模型
+│   │   ├── recharge_task_access.py   # 充值任务创建会话所有权摘要
+│   │   └── recharge_billing_mutation.py # 账单变更幂等与租约状态
 │   ├── routes/                       # 路由控制器
 │   │   ├── api.py                    # RESTful API（含批量授权、挂机守护、防盗、账号）
 │   │   └── main.py                   # 静态页面与 SPA 渲染入口
@@ -125,13 +127,13 @@ Google_Manager/
 │   └── nginx/
 │       └── google-manager.conf       # Nginx 反向代理与 SSL 模板
 ├── docs/                             # 架构与运维文档
-│   ├── server-deployment-guide.md    # 服务器生产部署与挂机收信全套指南
+│   ├── server-deployment-guide.md    # 服务器生产部署指南
 │   └── centralized-mailbox-security-guide.md # 集中邮箱防盗管理架构白皮书
 ├── Dockerfile                        # 生产级 Docker 镜像构建文件
 ├── docker-compose.yml                # Docker Compose 编排文件
 ├── instance/                         # SQLite 数据库运行目录
 ├── static/                           # 前端生产打包静态资源目录
-├── tests/                            # 全量测试套件 (148 tests)
+├── tests/                            # Python、Node.js 与 Playwright 回归测试
 │   ├── test_batch_oauth.py           # 批量 OAuth 授权单元测试
 │   ├── test_email_poller.py          # 挂机收信守护进程测试
 │   ├── test_api.py                   # 账号与鉴权后端测试
@@ -139,7 +141,7 @@ Google_Manager/
 │   ├── test_gmail_service.py         # Gmail 加密与解析测试
 │   ├── test_gmail_automation.py      # 邮件规则与自动化测试
 │   ├── test_googlemail_service.py    # Playwright 适配层测试
-│   └── frontend-ui.test.mjs          # Playwright 前端回归测试 (20/20 PASS)
+│   └── frontend-ui.test.mjs          # Playwright 前端回归测试
 ├── requirements.txt                  # Python 依赖清单
 └── run.py                            # 本地开发启动入口
 ```
@@ -157,23 +159,36 @@ Google_Manager/
 git clone https://github.com/superaddmin/Google_Manager.git /opt/google-manager
 cd /opt/google-manager
 
-# 2. 配置环境变量
-cat <<EOF > .env
-FLASK_ENV=production
-ADMIN_PASSWORD=YourComplexPassword_2026!
-SECRET_KEY=$(openssl rand -hex 32)
-GMAIL_TOKEN_ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
-GMAIL_CLIENT_SECRET_FILE=/app/credentials.json
-PROXY=http://user:pass@residential-proxy.net:port  # 住宅代理（防 Google 机房风控）
-HEADLESS=true
-EOF
+# 2. 从模板准备配置；已有部署必须保留原密钥
+umask 077
+test ! -e .env || { echo '.env 已存在，请保留原密钥'; exit 1; }
+cp deploy/env.production.example .env
+# 在受控编辑器中填写强随机密钥、实际域名和已验收镜像 repo@sha256:digest
+nano .env
 
 # 3. 放入 Google Cloud 下载的 credentials.json
 cp /path/to/your/credentials.json ./credentials.json
 
-# 4. 一键启动容器
-docker compose up -d --build
+# 4. 首次空数据目录启动容器
+sudo install -d -m 700 -o 10001 -g 10001 instance googlemail/runtime googlemail/output
+sudo chown 10001:10001 credentials.json
+sudo chmod 600 credentials.json
+python3 deploy/preflight.py --env-file .env --project-root .
+python3 deploy/compose_release.py config --env-file .env --project-root .
+python3 deploy/compose_release.py pull --env-file .env --project-root .
+# 由负责人从独立的 GO 审批记录提供；禁止自取包内 hash 冒充批准
+read -r -p '已批准的 manifest SHA-256: ' approved_manifest_sha256
+python3 deploy/compose_release.py up --env-file .env --project-root . --approved-manifest-sha256 "$approved_manifest_sha256"
 ```
+
+生产执行目录必须是完整发布准备包，单独 clone 的源码不含发布 manifest，不能直接上线。预检返回 2 时，只有人工签字一项待确认才可继续配置检查和拉取；其他失败或待确认均停止。签字完成后才允许初始化和启动。以上仅适用于首次空数据目录安装。生产 Compose 不含构建入口，必须指定已验收的不可变镜像。发布前完成[部署准备说明](docs/deployment-preparation.md)和[发布签字单](docs/release-signoff-template.md)。已有 `instance/accounts.db` 的环境必须先按部署指南停止写入、完成加密备份、结构迁移和存量敏感字段加密，不能直接执行 `up` 跳过升级步骤。
+
+容器启动并按部署指南完成健康与安全验收后，使用两个独立入口：
+
+- C 端充值门户：`https://你的域名/` 或 `https://你的域名/recharge`
+- Google 邮箱管理后台：`https://你的域名/admin`
+
+充值门户面向终端用户开放，不要求管理员登录；账号库、Gmail 收件箱、批量授权和安全中心仅在 `/admin` 管理后台提供。
 
 ### 方案 B：Linux VPS (Ubuntu/Debian) 原生一键部署
 
@@ -183,10 +198,10 @@ chmod +x deploy/setup-server.sh
 sudo bash deploy/setup-server.sh
 ```
 
-脚本将自动安装 Node.js 20、Python 虚拟环境、Playwright 浏览器与 Linux 图形依赖，并配置为开机自启的 Systemd 服务。
+脚本将安装固定补丁版本的 Node.js 24 LTS、Python 虚拟环境、Playwright 浏览器与 Linux 图形依赖，并注册、启用 Web/worker 的 systemd 单元；脚本不会自动启动业务服务。启动前必须按部署指南依次执行 `init-db`、存量敏感字段盘点/迁移和健康检查。
 
 详细服务器运维、Nginx 反代、Let's Encrypt 证书签发与代理防风控技巧详见：
-👉 **[服务器生产部署与挂机收信全套运维指南](docs/server-deployment-guide.md)**
+👉 **[服务器生产部署指南](docs/server-deployment-guide.md)**
 
 ***
 
@@ -222,31 +237,26 @@ sudo bash deploy/setup-server.sh
 
 ***
 
-## 🔎 全量代码审计与测试质量报告（2026-09-16）
+## 🔎 代码审计与测试状态（2026-09-20）
 
-本项目经过端到端全量回归测试，全部 148 项测试用例 100% 通过：
+整改后的验证结果、已关闭问题和剩余生产门禁统一记录在 [2026-09-20 整改与验收记录](docs/release-remediation-2026-09-20.md)。仓库内自动化测试和构建结果只证明对应隔离场景，不能替代目标 Linux 镜像、TLS、真实 Google 服务、充值上游、容量、恢复和告警送达验收。
 
-| 测试模块 | 覆盖功能范围 | 测试数量 | 运行结果 |
-| --- | --- | --- | --- |
-| **Python 后端全量测试** | API 路由、批量 OAuth 调度、挂机收信守护进程、安全防盗服务、Gmail 加密与规则 | 62 项 | **62 passed (100%)** |
-| **Playwright 前端 UI 回归** | 登录、导入、显隐密码防窥、Gmail 交互、Googlemail 状态流 | 20 项 | **20 passed (100%)** |
-| **Node.js 单元测试** | 多分隔符解析、API 异常处理、ESM 模块加载 | 19 项 | **19 passed (100%)** |
-| **Googlemail 自动化测试** | 2FA 换密、配置校验、数据脱敏、Playwright 自动化流程 | 47 项 | **47 passed (100%)** |
+充值中心当前是 CDK 履约与订阅管理工作台，不是现金充值/余额系统；本次发布范围也仅包含 CDK 工作台，现金支付另行排期。真实上游鉴权协议和生产 sandbox 仍须按整改记录验收，不能仅凭本地 mock 或隔离测试开启 live。
 
 ### 全量自动化回归命令
 
 ```powershell
-# 1. 运行 Python 全量测试 (62 项)
+# 1. 运行 Python 全量测试（以本次命令实际输出为准）
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 
 # 2. 构建前端生产资源
 npm --prefix frontend run build
 
-# 3. 运行 Node.js 基础测试与 Googlemail 自动化测试 (66 项)
+# 3. 运行 Node.js 基础测试与 Googlemail 自动化测试
 node --test tests/account-import.test.mjs tests/googlemail-local-copy.test.mjs tests/api-service.test.mjs
 npm --prefix googlemail test
 
-# 4. 运行 Playwright 浏览器端全量回归测试 (20 项)
+# 4. 运行 Playwright 浏览器端全量回归测试
 node --test tests/frontend-ui.test.mjs
 ```
 
@@ -255,3 +265,13 @@ node --test tests/frontend-ui.test.mjs
 ## 📄 开源协议
 
 本项目采用 [MIT License](LICENSE) 开源协议。
+
+## 生产部署与验收要点
+
+- 部署架构、配置约束、发布顺序和排障方法见 [部署技术说明](docs/deployment-technical-guide.md)。
+- C 端 `/`、`/recharge` 与管理端 `/admin` 分流；默认禁用真实充值，完成上游验收后才启用 `RECHARGE_MODE=live`。
+- 撤回/关闭必须同时匹配 `task_no`、完整卡密、目标邮箱和原创建会话的所有权摘要；历史任务没有所有权记录时匿名操作失败关闭，只能由管理员核对处理。
+- 同时运行 Web 与 `python -m app.worker`：任务、取消请求、收信开关持久化，执行中断的账号自动化不自动重放。
+- Compose 的 initialize 服务先创建包括 `recharge_task_access`、`recharge_billing_mutations` 在内的新增表并补齐 Gmail 执行租约字段，再启动 Web/worker；原生安装通过 ExecStartPre 执行 `python -m app.manage init-db`。
+- `/health/ready` 检查数据库、worker 心跳和生产敏感密文；Nginx 默认仅允许本机访问 `/health/`，远程监控应使用受控采集器或明确的地址白名单。仅页面返回 200 不代表可交付。
+- 备份恢复、专用用户权限、可信代理、上线验收和回滚步骤见 [生产部署指南](docs/server-deployment-guide.md#生产修复后的部署与验收)；是否具备上线条件以[整改与验收记录](docs/release-remediation-2026-09-20.md)为准。

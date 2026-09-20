@@ -3,14 +3,17 @@
 提供卡密验证、任务创建流转、契约核验与账单管理接口
 """
 from datetime import datetime
-from urllib.parse import urlparse
-from flask import Blueprint, request, jsonify, session, current_app, Response
+from werkzeug.exceptions import HTTPException
+from flask import Blueprint, request, jsonify, current_app, Response
+from app import db
 from app.models.recharge_task import RechargeTask
+from app.models.recharge_task_access import RechargeTaskAccess
 from app.services.recharge_service import (
     RechargeService,
     RechargeContractError,
     RechargeModeDisabledError,
     RechargeUpstreamError,
+    RechargeReconciliationConflictError,
 )
 
 recharge_bp = Blueprint('recharge', __name__)
@@ -27,10 +30,42 @@ def success_response(data=None, message='操作成功'):
 
 def error_response(message='操作失败', code=400):
     """统一错误响应格式"""
+    error_codes = {
+        400: 'invalid_request',
+        401: 'unauthorized',
+        402: 'payment_required',
+        403: 'forbidden',
+        404: 'not_found',
+        405: 'method_not_allowed',
+        406: 'not_acceptable',
+        408: 'timeout',
+        409: 'conflict',
+        410: 'gone',
+        411: 'length_required',
+        412: 'precondition_failed',
+        413: 'request_entity_too_large',
+        414: 'uri_too_long',
+        415: 'unsupported_media_type',
+        416: 'range_not_satisfiable',
+        417: 'expectation_failed',
+        422: 'unprocessable_entity',
+        423: 'locked',
+        424: 'failed_dependency',
+        428: 'precondition_required',
+        429: 'rate_limited',
+        431: 'request_header_fields_too_large',
+        451: 'unavailable_for_legal_reasons',
+        500: 'internal_error',
+        501: 'not_implemented',
+        502: 'upstream_error',
+        503: 'service_unavailable',
+        504: 'gateway_timeout',
+    }
     return jsonify({
         'success': False,
         'data': None,
-        'message': message
+        'message': message,
+        'error_code': error_codes.get(code, 'http_error'),
     }), code
 
 
@@ -49,25 +84,49 @@ def handle_recharge_contract_error(err):
     return error_response(str(err), 400)
 
 
-@recharge_bp.before_request
-def require_authentication():
-    """
-    蓝图鉴权：充值与交付服务接口均属于受保护资源，
-    必须通过管理员登录会话（session['authenticated']）方可访问。
-    对破坏性/修改状态的写操作检查 Origin 头防止跨站伪造。
-    """
-    if not session.get('authenticated'):
-        return error_response('请先登录系统', 401)
+@recharge_bp.errorhandler(RechargeReconciliationConflictError)
+def handle_recharge_reconciliation_conflict(err):
+    return error_response(str(err), 409)
 
+
+@recharge_bp.app_errorhandler(HTTPException)
+def handle_recharge_http_error(err):
+    """充值接口的 4xx/5xx 统一返回 JSON，避免路由阶段返回 Flask HTML。"""
+    if request.path != '/api/recharge' and not request.path.startswith('/api/recharge/'):
+        return err
+    status = err.code or 500
+    message = err.description if status < 500 else '充值服务暂不可用，请稍后重试'
+    return error_response(message, status)
+
+
+@recharge_bp.errorhandler(Exception)
+def handle_recharge_unexpected_error(err):
+    """兜底处理数据库/序列化异常，日志不写入凭证、卡密或异常原文。"""
+    if isinstance(err, HTTPException):
+        return handle_recharge_http_error(err)
+    try:
+        db.session.rollback()
+    except Exception:
+        pass
+    current_app.logger.error('充值接口未处理异常 type=%s', type(err).__name__)
+    return error_response('充值服务暂不可用，请稍后重试', 500)
+
+
+@recharge_bp.before_request
+def enforce_request_safety():
+    """
+    C 端充值接口允许匿名访问；挑战令牌仍绑定当前签名会话。
+    对修改状态的写操作检查 JSON 格式与 Origin，阻止跨站伪造。
+    """
+    from app.services.request_security import protect_write_request, limit_recharge_request
+    rejected = protect_write_request()
+    if rejected:
+        return rejected
     if request.method in ('POST', 'PUT', 'PATCH') and not isinstance(request.get_json(silent=True), dict):
         return error_response('请求格式错误，必须为 JSON 对象', 400)
 
-    if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
-        origin = request.headers.get('Origin')
-        if origin:
-            parsed = urlparse(origin)
-            if parsed.netloc and parsed.netloc != request.host:
-                return error_response('跨站请求被拦截 (Invalid Origin)', 403)
+    if request.endpoint not in {'recharge.get_config', 'recharge.get_agreement', 'recharge.get_features'}:
+        return limit_recharge_request()
 
 
 @recharge_bp.route('/config', methods=['GET'])
@@ -106,7 +165,7 @@ def get_avg_processing_time():
 def validate_redeem_code():
     """验证 CDK 卡密有效性与对应套餐"""
     data = request.get_json(silent=True) or {}
-    code = data.get('redeem_code') or request.args.get('redeem_code')
+    code = data.get('redeem_code')
     try:
         result = RechargeService.validate_redeem_code(code)
         return success_response(result)
@@ -117,7 +176,8 @@ def validate_redeem_code():
     except RechargeContractError as err:
         return error_response(str(err), 400)
     except Exception as err:
-        current_app.logger.error('验证 CDK 异常: %s', err)
+        db.session.rollback()
+        current_app.logger.error('验证 CDK 异常 type=%s', type(err).__name__)
         return error_response('CDK 验证服务暂不可用，请稍后重试', 500)
 
 
@@ -159,7 +219,8 @@ def create_task():
     except RechargeContractError as err:
         return error_response(str(err), 400)
     except Exception as err:
-        current_app.logger.error('创建充值任务失败: %s', err)
+        db.session.rollback()
+        current_app.logger.error('创建充值任务失败 type=%s', type(err).__name__)
         return error_response('创建任务失败，请检查凭证内容', 500)
 
 
@@ -175,6 +236,22 @@ def get_task(task_no):
         return error_response(str(err), 502)
     except RechargeContractError as err:
         return error_response(str(err), 404)
+
+
+@recharge_bp.route('/admin/tasks/<task_no>/reconcile', methods=['POST'])
+def reconcile_unknown_task(task_no):
+    """管理员依据已归档上游证据关闭 unknown 创建请求。"""
+    from app.services.auth_service import get_admin_session_actor_id
+
+    actor_id = get_admin_session_actor_id()
+    if actor_id is None:
+        return error_response('请先登录管理员账号', 401)
+    result = RechargeService.reconcile_unknown_task(
+        task_no,
+        request.get_json(silent=True) or {},
+        actor_id,
+    )
+    return success_response(result, '人工对账已完成')
 
 
 @recharge_bp.route('/tasks/lookup', methods=['POST'])
@@ -209,6 +286,26 @@ def lookup_batch():
         return error_response(str(err), 400)
 
 
+def authorize_task_action(data):
+    """Bind public destructive actions to both the displayed task and its owner."""
+    mode = RechargeService.ensure_enabled()
+    fields = {'task_no': 64, 'redeem_code': 120, 'email': 256}
+    for field, maximum in fields.items():
+        value = data.get(field)
+        if not isinstance(value, str) or not 1 <= len(value.strip()) <= maximum:
+            return error_response('请提供有效的任务编号、完整卡密和账号邮箱', 400)
+        data[field] = value.strip()
+    task = RechargeTask.query.filter_by(task_no=data['task_no'], is_mock=mode == 'mock').first()
+    if (
+        task is None
+        or task.redeem_code != data['redeem_code']
+        or task.account_email != data['email']
+        or not RechargeTaskAccess.permits_current_session(task.task_no)
+    ):
+        return error_response('任务信息不匹配或当前会话无操作权限，请使用创建任务的浏览器或联系管理员', 403)
+    return None
+
+
 @recharge_bp.route('/tasks/recall', methods=['POST'])
 def recall_task():
     """
@@ -217,6 +314,9 @@ def recall_task():
     """
     data = request.get_json(silent=True) or {}
     try:
+        rejected = authorize_task_action(data)
+        if rejected:
+            return rejected
         task = RechargeService.recall_task(data)
         return success_response(task, '任务已成功撤回')
     except RechargeModeDisabledError as err:
@@ -226,7 +326,8 @@ def recall_task():
     except RechargeContractError as err:
         return error_response(str(err), 400)
     except Exception as err:
-        current_app.logger.error('撤回任务异常: %s', err)
+        db.session.rollback()
+        current_app.logger.error('撤回任务异常 type=%s', type(err).__name__)
         return error_response('撤回任务失败，请稍后重试', 500)
 
 
@@ -238,6 +339,9 @@ def close_task():
     """
     data = request.get_json(silent=True) or {}
     try:
+        rejected = authorize_task_action(data)
+        if rejected:
+            return rejected
         task = RechargeService.close_task(data)
         return success_response(task, '任务已成功关闭，卡密已注销')
     except RechargeModeDisabledError as err:
@@ -247,32 +351,30 @@ def close_task():
     except RechargeContractError as err:
         return error_response(str(err), 400)
     except Exception as err:
-        current_app.logger.error('关闭任务异常: %s', err)
+        db.session.rollback()
+        current_app.logger.error('关闭任务异常 type=%s', type(err).__name__)
         return error_response('关闭任务失败，请稍后重试', 500)
 
 
-@recharge_bp.route('/tasks/invoice/download', methods=['GET', 'POST'])
+@recharge_bp.route('/tasks/invoice/download', methods=['POST'])
 def download_invoice():
-    """下载对账发票/收据凭证 (支持 GET/POST，读取卡密或任务号，需核实任务真实存在)"""
+    """通过 JSON POST 下载对账凭证，避免敏感标识进入 URL 与代理日志。"""
     mode = RechargeService.ensure_enabled()
     if mode != 'mock':
         return error_response('真实账单下载尚未完成授权契约验收，当前不可用', 503)
 
     data = request.get_json(silent=True) or {}
-    code = (
-        data.get('task_no')
-        or request.args.get('task_no')
-        or data.get('redeem_code')
-        or request.args.get('redeem_code')
-        or data.get('slug')
-        or request.args.get('slug')
-    )
-    if not code:
+    code = data.get('redeem_code')
+    if code is None:
+        code = data.get('slug')
+    if not isinstance(code, str) or not 1 <= len(code.strip()) <= 128:
         return error_response('缺少卡密或任务编号参数', 400)
 
-    safe_code = str(code).strip()
+    safe_code = code.strip()
+    if any(ord(char) < 0x20 or ord(char) == 0x7f for char in safe_code):
+        return error_response('账单标识格式无效', 400)
     task = RechargeTask.query.filter(
-        (RechargeTask.task_no == safe_code) | (RechargeTask.redeem_code == safe_code)
+        RechargeTask.redeem_code == safe_code
     ).filter_by(is_mock=True).order_by(RechargeTask.id.desc()).first()
 
     if not task:
@@ -299,14 +401,21 @@ def download_invoice():
             )
         return error_response('未找到关联任务，无法生成对账凭据', 404)
 
+    if task.status != 'completed':
+        return error_response('充值任务尚未完成，暂无法生成对账凭据', 409)
+
     created_time_str = task.created_at.strftime('%Y-%m-%d %H:%M:%S') if task.created_at else '-'
+    masked_code = (
+        f'{task.redeem_code[:4]}...{task.redeem_code[-4:]}'
+        if task.redeem_code and len(task.redeem_code) > 8 else '已隐藏'
+    )
     content = (
         f"GoogleManager 充值任务对账凭据\n"
         f"----------------------------------------\n"
         f"任务编号: {task.task_no}\n"
-        f"关联卡密: {task.redeem_code}\n"
+        f"关联卡密: {masked_code}\n"
         f"充值套餐: {task.plan_type}\n"
-        f"目标账号: {task.account_email}\n"
+        f"目标账号: 已隐藏\n"
         f"任务状态: {task.status} ({task.status_text})\n"
         f"支付卡号: {task.card_last4}\n"
         f"创建时间: {created_time_str}\n"
@@ -379,9 +488,20 @@ def billing_resume_subscription():
 
 @recharge_bp.route('/billing/invoice-file', methods=['POST'])
 def billing_invoice_file():
-    """获取账单文件链接"""
+    """获取不携带敏感 query 的账单文件 POST 请求描述。"""
+    mode = RechargeService.ensure_enabled()
+    if mode != 'mock':
+        return error_response('真实账单文件尚未完成授权契约验收，当前不可用', 503)
     data = request.get_json(silent=True) or {}
     slug = data.get('slug', 'default')
-    file_type = data.get('file_type', 'invoice')
-    url = f"/api/recharge/tasks/invoice/download?slug={slug}&type={file_type}"
-    return success_response({'url': url})
+    file_type = data.get('file_type', 'txt')
+    if not isinstance(slug, str) or not 1 <= len(slug.strip()) <= 128:
+        return error_response('账单标识必须是 1-128 个字符的文本', 400)
+    if not isinstance(file_type, str) or file_type not in RechargeService.INVOICE_FILE_TYPES:
+        return error_response('账单文件类型无效', 400)
+    slug = slug.strip()
+    return success_response({
+        'url': '/api/recharge/tasks/invoice/download',
+        'method': 'POST',
+        'payload': {'slug': slug, 'file_type': file_type},
+    })

@@ -11,6 +11,7 @@ import path from 'path';
 import * as config from './config.mjs';
 import { authorizeGoogleOAuth } from './oauth-authorizer.mjs';
 import { maskEmail, redactSensitiveText } from './redaction.mjs';
+import { getBrowserLaunchOptions } from './browser-runtime.mjs';
 
 function emitEvent(event, data = {}) {
   const payload = {
@@ -66,7 +67,7 @@ async function main() {
   console.log(`  SlowMo: ${slowMo}ms`);
   console.log(`  账号间隔: ${accountDelay}ms`);
   if (proxy) {
-    console.log(`  代理服务: ${proxy.server}`);
+    console.log('  代理服务: 已配置');
   }
   console.log('═'.repeat(60));
 
@@ -75,22 +76,36 @@ async function main() {
   let completedCount = 0;
   let failedCount = 0;
 
-  const browser = await chromium.launch({
+  let browser = null;
+  let activeContext = null;
+  let stopping = false;
+  let signalCleanup = false;
+  const closeBrowserForSignal = async () => {
+    if (signalCleanup) return;
+    signalCleanup = true;
+    stopping = true;
+    await activeContext?.close().catch(() => {});
+    await browser?.close().catch(() => {});
+    process.exitCode = 143;
+  };
+  process.once('SIGTERM', () => { void closeBrowserForSignal(); });
+  process.once('SIGINT', () => { void closeBrowserForSignal(); });
+
+  browser = await chromium.launch(getBrowserLaunchOptions({
     headless,
     slowMo,
     proxy,
     args: [
       '--disable-blink-features=AutomationControlled',
       '--disable-features=TranslateUI',
-      '--no-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-setuid-sandbox',
       '--lang=zh-CN',
     ],
-  });
+  }));
 
   try {
     for (let i = 0; i < tasks.length; i++) {
+      if (stopping) break;
       const task = tasks[i];
       const { accountId, email, password, secret, recovery, authUrl } = task;
 
@@ -104,6 +119,7 @@ async function main() {
         timezoneId: 'Asia/Shanghai',
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
       });
+      activeContext = context;
 
       const page = await context.newPage();
       await page.setExtraHTTPHeaders({ 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' });
@@ -121,6 +137,7 @@ async function main() {
         result = { success: false, error: err.message };
       } finally {
         await context.close().catch(() => {});
+        activeContext = null;
       }
 
       const resultRecord = {
@@ -156,13 +173,14 @@ async function main() {
       };
       fs.writeFileSync(progressFile, JSON.stringify(progressData, null, 2));
 
-      if (i < tasks.length - 1 && accountDelay > 0) {
+      if (!stopping && i < tasks.length - 1 && accountDelay > 0) {
         console.log(`  [等待] 账号间隔等待 ${accountDelay / 1000}s...`);
         await new Promise(resolve => setTimeout(resolve, accountDelay));
       }
     }
   } finally {
     await browser.close().catch(() => {});
+    browser = null;
   }
 
   console.log('\n' + '═'.repeat(60));

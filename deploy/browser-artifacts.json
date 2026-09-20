@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "browser": "chrome-for-testing",
+  "version": "153.0.8010.52",
+  "artifacts": {
+    "linux/amd64": {
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.52/linux64/chrome-linux64.zip",
+      "sha256": "e66f66d4802a46d4a022667e668aa950e277cadbfbed4b3777915b47413a0ef9",
+      "size": 195708470,
+      "archive_root": "chrome-linux64",
+      "executable": "chrome"
+    },
+    "linux/arm64": {
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.52/linux-arm64/chrome-linux-arm64.zip",
+      "sha256": "794441f3254273eb30d710b3eaab3cd1c7bbf1c88a40275470f6cee350881ce5",
+      "size": 195886869,
+      "archive_root": "chrome-linux-arm64",
+      "executable": "chrome"
+    }
+  }
+}

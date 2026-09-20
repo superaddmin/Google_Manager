@@ -1,13 +1,19 @@
 import json
+import os
+from pathlib import Path
+import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 from app import create_app, db
+from tests.auth_helpers import login_admin
 from app.models.account import Account
 from app.services.batch_oauth_service import (
     BatchOAuthError,
     BatchOAuthManager,
+    BatchOAuthTaskRecord,
     batch_oauth_manager,
 )
 from app.services.gmail_service import OAuthStateManager
@@ -17,8 +23,8 @@ class BatchOAuthTestCase(unittest.TestCase):
     def setUp(self):
         self.app = create_app('testing')
         self.client = self.app.test_client()
-        with self.client.session_transaction() as session:
-            session['authenticated'] = True
+        self.client.environ_base['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'
+        login_admin(self.client)
         self.context = self.app.app_context()
         self.context.push()
         db.create_all()
@@ -98,6 +104,129 @@ class BatchOAuthTestCase(unittest.TestCase):
     def test_batch_oauth_empty_accounts_rejected(self):
         with self.assertRaises(BatchOAuthError):
             batch_oauth_manager.start_batch(self.app, [])
+
+    def test_worker_environment_uses_explicit_allowlist(self):
+        captured_environment = {}
+        process = MagicMock()
+        process.stdout = []
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+
+        def launch(_command, **kwargs):
+            captured_environment.update(kwargs['env'])
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_file = root / 'synthetic.json'
+            output_dir = root / 'output'
+            task_file.write_text('[]', encoding='utf-8')
+            output_dir.mkdir()
+            record = BatchOAuthTaskRecord(
+                'synthetic-environment-task',
+                root,
+                task_file,
+                output_dir,
+                0,
+                [],
+                {
+                    'headless': True,
+                    'slowMo': 25,
+                    'accountDelay': 50,
+                    'proxy': 'http://proxy.example.test:8080',
+                },
+            )
+            manager = BatchOAuthManager(
+                project_root=root,
+                node_path='synthetic-node',
+                popen_factory=launch,
+            )
+            synthetic_environment = {
+                'PATH': str(root / 'bin'),
+                'FLASK_ENV': 'production',
+                'GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH': str(root / 'chrome'),
+                'SECRET_KEY': 'must-not-pass',
+                'ADMIN_PASSWORD': 'must-not-pass',
+                'GMAIL_TOKEN_ENCRYPTION_KEY': 'must-not-pass',
+                'NODE_OPTIONS': '--require=must-not-pass',
+            }
+            with (
+                patch.dict(os.environ, synthetic_environment, clear=True),
+                patch.object(manager, '_sync_final_results'),
+            ):
+                manager._run_worker(self.app, record)
+
+        for name in (
+            'SECRET_KEY',
+            'ADMIN_PASSWORD',
+            'GMAIL_TOKEN_ENCRYPTION_KEY',
+            'NODE_OPTIONS',
+        ):
+            self.assertNotIn(name, captured_environment)
+        self.assertEqual(captured_environment['PATH'], synthetic_environment['PATH'])
+        self.assertEqual(captured_environment['FLASK_ENV'], 'production')
+        self.assertEqual(
+            captured_environment['GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH'],
+            synthetic_environment['GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH'],
+        )
+        self.assertEqual(captured_environment['OAUTH_TASKS_FILE'], str(task_file))
+        self.assertEqual(captured_environment['OUTPUT_DIR'], str(output_dir))
+        self.assertEqual(captured_environment['HEADLESS'], 'true')
+        self.assertEqual(captured_environment['SLOW_MO'], '25')
+        self.assertEqual(captured_environment['ACCOUNT_DELAY'], '50')
+        self.assertEqual(
+            captured_environment['PROXY'],
+            'http://proxy.example.test:8080',
+        )
+
+    def test_cancel_before_process_registration_waits_for_exit_and_result_sync(self):
+        entered = threading.Event()
+        release = threading.Event()
+        syncing = threading.Event()
+        release_sync = threading.Event()
+        process = MagicMock()
+        process.stdout = []
+        process.poll.return_value = None
+        process.wait.return_value = 143
+        process.terminate.side_effect = lambda: setattr(process.poll, 'return_value', 143)
+
+        def launch(*args, **kwargs):
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError('synthetic launch barrier')
+            return process
+
+        def sync(*args):
+            syncing.set()
+            release_sync.wait(3)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_file = root / 'synthetic.json'
+            task_file.write_text('[]', encoding='utf-8')
+            record = BatchOAuthTaskRecord('synthetic-task', root, task_file, root, 1, [self.account1.id],
+                                          {'headless': True, 'slowMo': 0, 'accountDelay': 0})
+            manager = BatchOAuthManager(project_root=root, node_path='synthetic-node', popen_factory=launch)
+            manager._tasks[record.task_id] = record
+            with patch.object(manager, '_sync_final_results', side_effect=sync):
+                thread = threading.Thread(target=manager._run_worker, args=(self.app, record))
+                thread.start()
+                try:
+                    self.assertTrue(entered.wait(3))
+                    manager.cancel_task(record.task_id)
+                    self.assertEqual(record.status, 'running')
+                    self.assertTrue(task_file.exists())
+                    release.set()
+                    self.assertTrue(syncing.wait(3))
+                    process.terminate.assert_called_once()
+                    self.assertNotEqual(record.status, 'cancelled')
+                finally:
+                    release.set()
+                    release_sync.set()
+                    thread.join(5)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(record.status, 'cancelled')
+            self.assertFalse(task_file.exists())
 
     def test_batch_oauth_api_endpoints(self):
         # 1. 启动批量授权 API

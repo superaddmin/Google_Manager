@@ -5,8 +5,11 @@
 """
 import time
 import unittest
+from cryptography.fernet import Fernet
+from flask import url_for
 from unittest.mock import patch
 from app import create_app, db
+from tests.auth_helpers import login_admin
 from app.services.recharge_service import RechargeService, RechargeUpstreamError
 
 
@@ -19,6 +22,7 @@ class RechargeTestCase(unittest.TestCase):
         db.create_all()
         RechargeService.clear_local_data()
         self.client = self.app.test_client()
+        self.client.environ_base['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest'
 
     def tearDown(self):
         db.drop_all()
@@ -28,8 +32,7 @@ class RechargeTestCase(unittest.TestCase):
         self.context.pop()
 
     def login(self):
-        with self.client.session_transaction() as session:
-            session["authenticated"] = True
+        login_admin(self.client)
 
     def issue_challenge(self, code, token_input='dummy', plan_type='PLUS'):
         response = self.client.post('/api/recharge/submission-challenges', json={
@@ -38,8 +41,8 @@ class RechargeTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         return response.get_json()['data']
 
-    def test_unauthenticated_requests_are_rejected_with_401(self):
-        """验证蓝图鉴权：未登录时所有充值接口均应返回 401"""
+    def test_public_recharge_endpoints_do_not_require_admin_login(self):
+        """C 端充值接口不应依赖管理员登录会话。"""
         endpoints = [
             ("/api/recharge/config", "GET", None),
             ("/api/recharge/agreement", "GET", None),
@@ -56,8 +59,24 @@ class RechargeTestCase(unittest.TestCase):
                     resp = self.client.get(url)
                 else:
                     resp = self.client.post(url, json=payload or {})
-                self.assertEqual(resp.status_code, 401, f"{url} should require auth")
-                self.assertFalse(resp.get_json()["success"])
+                expected_status = 400 if url == '/api/recharge/tasks' else 200
+                self.assertEqual(resp.status_code, expected_status, resp.get_json())
+                self.assertEqual(resp.get_json()['success'], expected_status == 200)
+
+    def test_public_and_admin_pages_are_separate_spa_entries(self):
+        with self.app.test_request_context():
+            self.assertEqual(url_for('main.index'), '/')
+        for url in (
+            '/', '/recharge', '/recharge/', '/admin', '/admin/',
+            '/admin/accounts', '/admin/accounts/',
+        ):
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                try:
+                    self.assertEqual(response.status_code, 200)
+                    self.assertIn(b'<div id="root"></div>', response.data)
+                finally:
+                    response.close()
 
     def test_authenticated_metadata_and_cdk_validation(self):
         """验证登录后获取配置、协议、耗时以及 CDK 校验"""
@@ -113,6 +132,7 @@ class RechargeTestCase(unittest.TestCase):
             "account_email": "test@gmail.com",
             "agreement_accepted": True,
             "email_verified": True,
+            "acknowledge_non_free": True,
         }
         resp = self.client.post("/api/recharge/tasks", json=payload)
         self.assertEqual(resp.status_code, 400)
@@ -144,7 +164,7 @@ class RechargeTestCase(unittest.TestCase):
         task = resp.get_json()["data"]
         self.assertIn("TK-", task["task_no"])
         self.assertEqual(task["status"], "processing")
-        self.assertEqual(task["redeem_code"], "PLUS-TEST-1234")
+        self.assertNotIn("redeem_code", task)
 
     def test_task_lookup_and_batch_lookup(self):
         """验证单任务查询与批量查询"""
@@ -160,6 +180,7 @@ class RechargeTestCase(unittest.TestCase):
             "account_email": "batch1@gmail.com",
             "agreement_accepted": True,
             "email_verified": True,
+            "acknowledge_non_free": True,
             "challenge_token": ch["challenge_token"]
         }
         create_res = self.client.post("/api/recharge/tasks", json=payload)
@@ -169,8 +190,8 @@ class RechargeTestCase(unittest.TestCase):
         resp = self.client.post("/api/recharge/tasks/lookup", json={"redeem_code": "BATCH-TEST-001"})
         self.assertEqual(resp.status_code, 200)
         task = resp.get_json()["data"]
-        self.assertEqual(task["redeem_code"], "BATCH-TEST-001")
-        self.assertEqual(task["account_email"], "batch1@gmail.com")
+        self.assertNotIn("redeem_code", task)
+        self.assertNotIn("account_email", task)
 
         # 批量查询
         resp = self.client.post("/api/recharge/tasks/lookup-batch", json={
@@ -198,12 +219,14 @@ class RechargeTestCase(unittest.TestCase):
             "account_email": email,
             "agreement_accepted": True,
             "email_verified": True,
+            "acknowledge_non_free": True,
             "challenge_token": ch["challenge_token"]
         })
         self.assertEqual(create_res.status_code, 201)
 
         # 撤回任务
         resp = self.client.post("/api/recharge/tasks/recall", json={
+            "task_no": create_res.get_json()['data']['task_no'],
             "redeem_code": code,
             "email": email,
             "confirmed": True
@@ -213,6 +236,7 @@ class RechargeTestCase(unittest.TestCase):
 
         # 关闭任务（破坏性写操作，未确认被拒绝）
         resp = self.client.post("/api/recharge/tasks/close", json={
+            "task_no": create_res.get_json()['data']['task_no'],
             "redeem_code": code,
             "email": email,
             "confirmed": False
@@ -222,6 +246,7 @@ class RechargeTestCase(unittest.TestCase):
 
         # 关闭任务（确认后执行成功）
         resp = self.client.post("/api/recharge/tasks/close", json={
+            "task_no": create_res.get_json()['data']['task_no'],
             "redeem_code": code,
             "email": email,
             "confirmed": True
@@ -280,7 +305,9 @@ class RechargeTestCase(unittest.TestCase):
 
         # SUP-07 / SUP-11: 账单收据下载凭据事实核验
         invoice = query_after_resume.get_json()['data']['invoices'][0]
-        resp_inv = self.client.get('/api/recharge/tasks/invoice/download', query_string={'slug': invoice['slug']})
+        resp_inv = self.client.post(
+            '/api/recharge/tasks/invoice/download', json={'slug': invoice['slug']}
+        )
         self.assertEqual(resp_inv.status_code, 200)
         self.assertIn("账单收据凭据", resp_inv.data.decode("utf-8"))
         self.assertIn(invoice['id'], resp_inv.data.decode("utf-8"))
@@ -311,6 +338,7 @@ class RechargeTestCase(unittest.TestCase):
             "account_email": "user@example.com",
             "agreement_accepted": True,
             "email_verified": True,
+            "acknowledge_non_free": True,
             "challenge_token": token
         }
         resp = self.client.post("/api/recharge/tasks", json=payload)
@@ -345,17 +373,22 @@ class RechargeTestCase(unittest.TestCase):
         """P0-01 模式隔离：live 模式上游失败返回 502，绝不虚假降级返回 mock 成功"""
         self.login()
         with patch.object(RechargeService, 'get_mode', return_value='live'):
-            with patch.object(RechargeService, '_upstream_post', side_effect=RechargeUpstreamError("上游接口超时")):
+            # live challenge 会先调用卡密校验上游，任务创建阶段才注入故障。
+            with patch.object(RechargeService, '_upstream_post', return_value={
+                'ok': True, 'result': {'plan_type': 'PLUS', 'status': 'unused'},
+            }):
                 ch = self.issue_challenge("LIVE-FAIL-001", 'valid-token')
-                payload = {
-                    "redeem_code": "LIVE-FAIL-001",
-                    "token_input": "valid-token",
-                    "plan_type": "PLUS",
-                    "account_email": "live@example.com",
-                    "agreement_accepted": True,
-                    "email_verified": True,
-                    "challenge_token": ch["challenge_token"]
-                }
+            payload = {
+                "redeem_code": "LIVE-FAIL-001",
+                "token_input": "valid-token",
+                "plan_type": "PLUS",
+                "account_email": "live@example.com",
+                "agreement_accepted": True,
+                "email_verified": True,
+                "acknowledge_non_free": True,
+                "challenge_token": ch["challenge_token"]
+            }
+            with patch.object(RechargeService, '_upstream_post', side_effect=RechargeUpstreamError("上游接口超时")):
                 resp = self.client.post("/api/recharge/tasks", json=payload)
                 self.assertEqual(resp.status_code, 502)
                 self.assertIn("上游接口超时", resp.get_json()["message"])
@@ -373,12 +406,17 @@ class RechargeTestCase(unittest.TestCase):
             "account_email": email,
             "agreement_accepted": True,
             "email_verified": True,
+            "acknowledge_non_free": True,
             "challenge_token": ch["challenge_token"]
         })
         self.assertEqual(create_res.status_code, 201)
 
+        # 关闭前先获取重提交所需的 challenge；关闭后生成 challenge 会被卡密状态校验提前拒绝。
+        ch2 = self.issue_challenge(code)
+
         # 关闭任务
         close_res = self.client.post("/api/recharge/tasks/close", json={
+            "task_no": create_res.get_json()['data']['task_no'],
             "redeem_code": code,
             "email": email,
             "confirmed": True
@@ -386,7 +424,6 @@ class RechargeTestCase(unittest.TestCase):
         self.assertEqual(close_res.status_code, 200)
 
         # 尝试再次使用已关闭 CDK 提交创建新任务：必须被拒绝
-        ch2 = self.issue_challenge(code)
         retry_res = self.client.post("/api/recharge/tasks", json={
             "redeem_code": code,
             "token_input": "dummy",
@@ -394,26 +431,31 @@ class RechargeTestCase(unittest.TestCase):
             "account_email": email,
             "agreement_accepted": True,
             "email_verified": True,
+            "acknowledge_non_free": True,
             "challenge_token": ch2["challenge_token"]
         })
         self.assertEqual(retry_res.status_code, 400)
         self.assertIn("已关闭销毁", retry_res.get_json()["message"])
 
-    def test_invoice_download_endpoints_get_and_post(self):
+    def test_invoice_download_requires_json_post(self):
         """SUP-11 发票/凭据下载：必须验证任务真实存在；disabled 503；不存在 404；存在返回事实对账凭据"""
         from app.models.recharge_task import RechargeTask
         self.login()
 
-        # 1. 任务不存在时下载返回 404
-        resp_404 = self.client.get("/api/recharge/tasks/invoice/download?redeem_code=NON-EXISTENT-CDK")
+        # 1. 任务不存在时下载返回 404；GET/query 不再接收敏感标识
+        resp_get = self.client.get("/api/recharge/tasks/invoice/download?redeem_code=NON-EXISTENT-CDK")
+        self.assertEqual(resp_get.status_code, 405)
+        resp_404 = self.client.post(
+            "/api/recharge/tasks/invoice/download", json={"redeem_code": "NON-EXISTENT-CDK"}
+        )
         self.assertEqual(resp_404.status_code, 404)
         self.assertIn("未找到关联任务", resp_404.get_json()["message"])
 
         # 2. 缺少参数报错 400
-        resp_err = self.client.get("/api/recharge/tasks/invoice/download")
+        resp_err = self.client.post("/api/recharge/tasks/invoice/download", json={})
         self.assertEqual(resp_err.status_code, 400)
 
-        # 3. 创建持久化真实任务后测试 GET / POST 下载
+        # 3. 创建持久化真实任务后仅通过 JSON POST 下载
         task = RechargeTask(
             task_no="TK-DOWNLOAD-001",
             redeem_code="INV-GET-123456",
@@ -427,23 +469,81 @@ class RechargeTestCase(unittest.TestCase):
         db.session.add(task)
         db.session.commit()
 
-        # GET 方式按卡密下载
-        resp_get = self.client.get("/api/recharge/tasks/invoice/download?redeem_code=INV-GET-123456")
-        self.assertEqual(resp_get.status_code, 200)
-        self.assertIn("attachment", resp_get.headers.get("Content-Disposition", ""))
-        self.assertIn("receipt-TK-DOWNLOAD-001", resp_get.headers.get("Content-Disposition", ""))
-        self.assertIn("对账凭据", resp_get.data.decode("utf-8"))
-        self.assertIn("INV-GET-123456", resp_get.data.decode("utf-8"))
+        # 未完成任务不能生成看似已付款的收据
+        resp_pending = self.client.post(
+            "/api/recharge/tasks/invoice/download", json={"redeem_code": "INV-GET-123456"}
+        )
+        self.assertEqual(resp_pending.status_code, 409)
 
-        # POST 方式按任务号下载
-        resp_post = self.client.post("/api/recharge/tasks/invoice/download", json={"task_no": "TK-DOWNLOAD-001"})
+        # 任务完成后，POST 方式按卡密下载
+        task.status = "completed"
+        task.status_text = "已完成"
+        db.session.commit()
+        resp_post = self.client.post("/api/recharge/tasks/invoice/download", json={"redeem_code": "INV-GET-123456"})
         self.assertEqual(resp_post.status_code, 200)
         self.assertIn("TK-DOWNLOAD-001", resp_post.data.decode("utf-8"))
+        self.assertNotIn("download@example.com", resp_post.data.decode("utf-8"))
 
         # 4. disabled 模式下请求下载阻断返回 503
         with patch.object(RechargeService, 'get_mode', return_value='disabled'):
-            resp_disabled = self.client.get("/api/recharge/tasks/invoice/download?task_no=TK-DOWNLOAD-001")
+            resp_disabled = self.client.post(
+                "/api/recharge/tasks/invoice/download", json={"redeem_code": "INV-GET-123456"}
+            )
             self.assertEqual(resp_disabled.status_code, 503)
+
+    def test_invoice_file_contract_is_mode_gated_and_query_free(self):
+        """账单文件请求不能在 disabled/live 模式伪造，也不能把标识放入 query。"""
+        self.login()
+        encoded = self.client.post('/api/recharge/billing/invoice-file', json={
+            'slug': 'inv&redirect=https://evil.example.test',
+            'file_type': 'txt',
+        })
+        self.assertEqual(encoded.status_code, 200)
+        data = encoded.get_json()['data']
+        self.assertEqual(data['url'], '/api/recharge/tasks/invoice/download')
+        self.assertEqual(data['method'], 'POST')
+        self.assertEqual(data['payload']['slug'], 'inv&redirect=https://evil.example.test')
+
+        invalid_type = self.client.post('/api/recharge/billing/invoice-file', json={
+            'slug': 'invoice-1', 'file_type': 'pdf',
+        })
+        self.assertEqual(invalid_type.status_code, 400)
+
+        with patch.object(RechargeService, 'get_mode', return_value='disabled'):
+            self.assertEqual(
+                self.client.post('/api/recharge/billing/invoice-file', json={}).status_code,
+                503,
+            )
+        with patch.object(RechargeService, 'get_mode', return_value='live'):
+            self.assertEqual(
+                self.client.post('/api/recharge/billing/invoice-file', json={}).status_code,
+                503,
+            )
+
+    def test_recharge_input_types_are_not_coerced_to_credentials(self):
+        """卡密、凭证和批量列表中的数字等非文本输入必须被拒绝。"""
+        self.login()
+        challenge = self.client.post('/api/recharge/submission-challenges', json={
+            'redeem_code': 1234, 'token_input': 'credential', 'plan_type': 'PLUS',
+        })
+        self.assertEqual(challenge.status_code, 400)
+        challenge = self.client.post('/api/recharge/submission-challenges', json={
+            'redeem_code': 'PLUS-TYPE-001', 'token_input': 1234, 'plan_type': 'PLUS',
+        })
+        self.assertEqual(challenge.status_code, 400)
+        batch = self.client.post('/api/recharge/tasks/lookup-batch', json={
+            'redeem_codes': ['PLUS-TYPE-001', 1234],
+        })
+        self.assertEqual(batch.status_code, 400)
+
+    def test_redeem_validation_ignores_query_credentials(self):
+        """卡密校验只接受 JSON，避免卡密进入浏览器历史和代理日志。"""
+        response = self.client.post(
+            '/api/recharge/redeem-codes/validate?redeem_code=PLUS-QUERY-SECRET',
+            json={},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('卡密', response.get_json()['message'])
 
     def test_recharge_mode_invalid_fallback_disabled(self):
         """SUP-04 严格枚举：非法模式配置必须回退至 disabled 并在请求时返回 503"""
@@ -461,7 +561,7 @@ class RechargeTestCase(unittest.TestCase):
             "FLASK_ENV": "production",
             "SECRET_KEY": "a-very-secure-secret-key-that-is-at-least-32-chars-long!",
             "ADMIN_PASSWORD": "ProductionCustomSecretPassword2026!",
-            "GMAIL_TOKEN_ENCRYPTION_KEY": "dGVzdC1lbmNyeXB0aW9uLWtleS12YWxpZC0zMmJ5dGVzIQ==",
+            "GMAIL_TOKEN_ENCRYPTION_KEY": Fernet.generate_key().decode(),
             "RECHARGE_MODE": "mock"
         }
         with patch.dict(os.environ, valid_env, clear=False):
@@ -487,6 +587,7 @@ class RechargeTestCase(unittest.TestCase):
             "account_email": "mismatch@gmail.com",
             "agreement_accepted": True,
             "email_verified": True,
+            "acknowledge_non_free": True,
             "challenge_token": ch["challenge_token"]
         }
         resp = self.client.post("/api/recharge/tasks", json=payload)
@@ -503,6 +604,7 @@ class RechargeTestCase(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 403)
         self.assertIn("Origin", resp.get_json()["message"])
+        self.assertEqual(resp.get_json()['error_code'], 'forbidden')
 
     def test_task_creation_upstream_failure_persists_unknown_and_prevents_duplicate(self):
         """SUP-05: live 模式上游异常前已落库 pending，超时后转为 unknown 并阻断重复提交"""
@@ -510,7 +612,10 @@ class RechargeTestCase(unittest.TestCase):
         self.login()
         code = "UPSTREAM-TIMEOUT-CDK-001"
         self.app.config['RECHARGE_MODE'] = 'live'
-        ch = self.issue_challenge(code, '{"accessToken":"test-token"}')
+        with patch.object(RechargeService, '_upstream_post', return_value={
+            'ok': True, 'result': {'plan_type': 'PLUS', 'status': 'unused'},
+        }):
+            ch = self.issue_challenge(code, '{"accessToken":"test-token"}')
 
         payload = {
             "redeem_code": code,
@@ -519,6 +624,7 @@ class RechargeTestCase(unittest.TestCase):
             "account_email": "timeout@gmail.com",
             "agreement_accepted": True,
             "email_verified": True,
+            "acknowledge_non_free": True,
             "challenge_token": ch["challenge_token"]
         }
 
@@ -534,7 +640,10 @@ class RechargeTestCase(unittest.TestCase):
             self.assertIn("核对结果", persisted.notice)
 
             # 验证同一卡密已有任务，禁止重入与重复提交
-            ch2 = self.issue_challenge(code, payload['token_input'])
+            with patch.object(RechargeService, '_upstream_post', return_value={
+                'ok': True, 'result': {'plan_type': 'PLUS', 'status': 'unused'},
+            }):
+                ch2 = self.issue_challenge(code, payload['token_input'])
             payload["challenge_token"] = ch2["challenge_token"]
             with patch.object(RechargeService, '_upstream_post', return_value={"ok": True, "task": {"status": "processing"}}):
                 retry_res = self.client.post("/api/recharge/tasks", json=payload)
