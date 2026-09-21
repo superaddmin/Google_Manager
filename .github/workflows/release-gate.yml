@@ -83,7 +83,7 @@ jobs:
         env:
           FLASK_ENV: production
           GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH: ${{ runner.temp }}/google-manager-chrome/chrome
-        run: node --test tests/frontend-ui.test.mjs
+        run: node --test tests/frontend-ui.test.mjs tests/recharge-ui.test.mjs tests/recharge-flow.test.mjs
 
   dependency-audit:
     name: Dependency and repository audit

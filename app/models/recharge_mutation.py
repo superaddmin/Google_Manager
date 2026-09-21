@@ -66,7 +66,18 @@ class RechargeMutation(db.Model):
 
     @classmethod
     def finish(cls, task_no, operation_id, state):
-        cls.query.filter_by(task_no=task_no, operation_id=operation_id).update({'state': state})
+        source_states = {
+            'unknown': ('pending',),
+            'done': ('pending', 'unknown'),
+        }.get(state)
+        if source_states is None:
+            raise ValueError('unsupported recharge mutation state')
+        return cls.query.filter_by(
+            task_no=task_no,
+            operation_id=operation_id,
+        ).filter(
+            cls.state.in_(source_states),
+        ).update({'state': state}) == 1
 
     @classmethod
     def recover_expired(cls):

@@ -145,6 +145,7 @@ def run_job(application, identifier, stopping):
 def maintenance(application):
     with application.app_context():
         failures = []
+        recharge_cursor = RuntimeQueue.state('maintenance').get('rechargeCursor', 0)
         GmailExecution.recover_expired_confirmations()
         retried = GmailRuleService.retry_due_actions()
         if retried['failed']:
@@ -164,14 +165,21 @@ def maintenance(application):
                     'consecutiveFailures': previous.get('consecutiveFailures', 0) + 1})
                 failures.append('gmail_sync:' + type(error).__name__)
         if application.config['RECHARGE_MODE'] == 'live':
-            tasks = RechargeTask.query.filter(RechargeTask.is_mock.is_(False), or_(
+            task_query = RechargeTask.query.filter(RechargeTask.is_mock.is_(False), or_(
                 RechargeTask.status.in_(('pending', 'unknown', 'processing')),
                 RechargeMutation.query.filter(RechargeMutation.task_no == RechargeTask.task_no,
                                               RechargeMutation.state == 'unknown').exists(),
-            )).order_by(RechargeTask.updated_at).limit(20).all()
-            for task in tasks:
+            ))
+            # Rotate independently of status timestamps so failed polls cannot
+            # monopolize the bounded reconciliation batch.
+            tasks = task_query.filter(RechargeTask.id > recharge_cursor).order_by(RechargeTask.id).limit(20).all()
+            if len(tasks) < 20 and recharge_cursor:
+                tasks += task_query.filter(RechargeTask.id <= recharge_cursor).order_by(RechargeTask.id).limit(20 - len(tasks)).all()
+            targets = [(task.id, task.task_no) for task in tasks]
+            for task_id, task_no in targets:
+                recharge_cursor = task_id
                 try:
-                    RechargeService.get_task_by_no(task.task_no)
+                    RechargeService.get_task_by_no(task_no)
                 except Exception as error:
                     db.session.rollback()
                     failures.append('recharge:' + type(error).__name__)
@@ -188,6 +196,7 @@ def maintenance(application):
             'lastAttempt': time.time(), 'lastSuccess': time.time() if not failures else previous.get('lastSuccess', 0),
             'consecutiveFailures': previous.get('consecutiveFailures', 0) + 1 if failures else 0,
             'errors': sorted(set(failures)),
+            'rechargeCursor': recharge_cursor,
         })
         db.session.remove()
 

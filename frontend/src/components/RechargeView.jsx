@@ -252,15 +252,19 @@ const RechargeView = ({ darkMode, showNotification }) => {
             if (signal?.aborted) return;
             if (configRes?.data) setSystemConfig(configRes.data);
             if (configRes?.data?.mode === 'disabled') return;
+            const timesRequest = configRes?.data?.mode === 'mock'
+                ? api.getRechargeAvgTime('gpt', 'card', { signal })
+                : Promise.resolve({ success: true, data: [] });
             const [timesResult, agreementResult] = await Promise.allSettled([
-                api.getRechargeAvgTime('gpt', 'card', { signal }),
+                timesRequest,
                 api.getRechargeAgreement({ signal }),
             ]);
             if (signal?.aborted) return;
             if (timesResult.status === 'fulfilled') {
-                if (timesResult.value?.data) setAvgTimes(timesResult.value.data);
+                setAvgTimes(Array.isArray(timesResult.value?.data) ? timesResult.value.data : []);
             } else {
                 console.error('加载平均耗时失败:', timesResult.reason);
+                setAvgTimes([]);
             }
             if (agreementResult.status === 'fulfilled' && agreementResult.value?.data?.content) {
                 setAgreementContent(agreementResult.value.data.content);
@@ -408,6 +412,8 @@ const RechargeView = ({ darkMode, showNotification }) => {
         cdkValidationController.current?.abort();
         const controller = new AbortController();
         cdkValidationController.current = controller;
+        setCdkInfo(null);
+        setIsRenewal(false);
         setValidatingCdk(true);
         try {
             const res = await api.validateRedeemCode(code, { signal: controller.signal });
@@ -630,13 +636,19 @@ const RechargeView = ({ darkMode, showNotification }) => {
             showNotification?.('请输入待批量查询的卡密列表', 'error');
             return;
         }
-        const codes = text
-            .split(/[\n,;\s]+/)
-            .map(c => c.trim())
-            .filter(Boolean);
+        const codes = Array.from(new Set(
+            text
+                .split(/[\n,;\s]+/)
+                .map(c => c.trim())
+                .filter(Boolean),
+        ));
 
         if (codes.length === 0) {
             showNotification?.('未检测到有效卡密', 'error');
+            return;
+        }
+        if (codes.some(code => code.length < 4 || code.length > 120)) {
+            showNotification?.('每个 CDK 卡密长度须在 4-120 字符之间', 'error');
             return;
         }
         if (codes.length > 50) {
@@ -650,11 +662,12 @@ const RechargeView = ({ darkMode, showNotification }) => {
         lookupController.current?.abort();
         const controller = new AbortController();
         batchLookupController.current = controller;
+        setBatchResults([]);
         setLookupLoading(true);
         try {
             const res = await api.lookupBatchRechargeTasks(codes, { signal: controller.signal });
             if (controller.signal.aborted || requestId !== batchLookupRequestId.current) return;
-            if (res.success && res.data) {
+            if (res.success && Array.isArray(res.data)) {
                 setBatchResults(res.data);
                 showNotification?.(`批量查询完成：共 ${res.data.length} 条记录`, 'success');
             } else {
@@ -784,6 +797,7 @@ const RechargeView = ({ darkMode, showNotification }) => {
         billingController.current?.abort();
         const controller = new AbortController();
         billingController.current = controller;
+        setBillingResult(null);
         setBillingLoading(true);
         try {
             const res = await api.queryBilling(token, { signal: controller.signal });
@@ -935,13 +949,13 @@ const RechargeView = ({ darkMode, showNotification }) => {
                 </div>
 
                 {/* 平均耗时展示条 */}
-                {avgTimes.length > 0 && (
+                {systemConfig?.mode === 'mock' && avgTimes.length > 0 && (
                     <div className={`mt-5 pt-4 border-t flex flex-wrap items-center gap-2 text-xs ${
                         darkMode ? 'border-slate-700/60 text-slate-400' : 'border-slate-100 text-slate-500'
                     }`}>
                         <div className="flex items-center gap-1.5 font-medium mr-2 text-emerald-600 dark:text-emerald-400">
                             <Clock size={14} />
-                            <span>近 7 天平均耗时：</span>
+                            <span>沙箱参考耗时（非实时）：</span>
                         </div>
                         {avgTimes.map(item => (
                             <span
@@ -992,9 +1006,11 @@ const RechargeView = ({ darkMode, showNotification }) => {
                                             setValidatingCdk(false);
                                             setCdkInput(value);
                                             setCdkInfo(null);
+                                            setCreatedTask(null);
                                             setIsRenewal(false);
                                         }}
-                                        placeholder="请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）"
+                                        placeholder="请输入 4-120 字符的 CDK 卡密（如 PLUS-XXXX-XXXX）"
+                                        maxLength={120}
                                         disabled={submittingTask}
                                         autoComplete="off"
                                         spellCheck={false}
@@ -1087,6 +1103,7 @@ const RechargeView = ({ darkMode, showNotification }) => {
                                         rows={4}
                                         value={tokenInput}
                                         onChange={e => setTokenInput(e.target.value)}
+                                        maxLength={65535}
                                         disabled={submittingTask}
                                         autoComplete="off"
                                         spellCheck={false}
@@ -1132,6 +1149,7 @@ const RechargeView = ({ darkMode, showNotification }) => {
                                                 setEmailConfirmed(false);
                                             }}
                                             disabled={submittingTask}
+                                            maxLength={256}
                                             placeholder="user@gmail.com"
                                             className={`w-full px-4 py-2.5 rounded-2xl border text-sm outline-none transition-all ${
                                                 darkMode
@@ -1359,6 +1377,7 @@ const RechargeView = ({ darkMode, showNotification }) => {
                                             }
                                         }}
                                         placeholder="输入 CDK 卡密或任务编号（如 PLUS-XXXX 或 TK-2026...）"
+                                        maxLength={128}
                                         autoComplete="off"
                                         spellCheck={false}
                                         className={`w-full px-4 py-3 pr-12 rounded-2xl border text-sm font-mono outline-none transition-all ${
@@ -1504,7 +1523,9 @@ const RechargeView = ({ darkMode, showNotification }) => {
                                             label="批量卡密"
                                             disabled={lookupLoading}
                                         />
-                                        <span className="text-xs text-slate-400">已输入 {batchCdkText.split(/[\n,;\s]+/).filter(Boolean).length} / 50 个卡密</span>
+                                        <span className="text-xs text-slate-400">
+                                            已输入 {new Set(batchCdkText.split(/[\n,;\s]+/).map(code => code.trim()).filter(Boolean)).size} / 50 个卡密
+                                        </span>
                                     </div>
                                     <button
                                         onClick={handleBatchLookup}
@@ -1570,6 +1591,7 @@ const RechargeView = ({ darkMode, showNotification }) => {
                                     value={billingToken}
                                     onChange={e => setBillingToken(e.target.value)}
                                     disabled={billingActionLoading}
+                                    maxLength={65535}
                                     autoComplete="off"
                                     spellCheck={false}
                                     placeholder="输入账号 accessToken 或 chatgpt.com/api/auth/session 返回内容"
@@ -1797,6 +1819,7 @@ const RechargeView = ({ darkMode, showNotification }) => {
                                             value={actionModal.redeemCode}
                                             onChange={event => setActionModal(current => ({ ...current, redeemCode: event.target.value }))}
                                             placeholder="请输入完整卡密"
+                                            maxLength={120}
                                             autoComplete="off"
                                             spellCheck={false}
                                             disabled={actionLoading}
@@ -1820,6 +1843,7 @@ const RechargeView = ({ darkMode, showNotification }) => {
                                         value={actionModal.email}
                                         onChange={event => setActionModal(current => ({ ...current, email: event.target.value }))}
                                         placeholder="user@gmail.com"
+                                        maxLength={256}
                                         autoComplete="off"
                                         disabled={actionLoading}
                                         className={`w-full px-3.5 py-2.5 rounded-xl border text-sm outline-none disabled:opacity-60 ${

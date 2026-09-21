@@ -243,6 +243,8 @@ sudo bash deploy/setup-server.sh
 
 充值中心当前是 CDK 履约与订阅管理工作台，不是现金充值/余额系统；本次发布范围也仅包含 CDK 工作台，现金支付另行排期。真实上游鉴权协议和生产 sandbox 仍须按整改记录验收，不能仅凭本地 mock 或隔离测试开启 live。
 
+充值中心最新的前后端契约、问题复现与修复、测试证据及上线限制见 [2026-09-21 全链路审查](docs/recharge-release-audit-2026-09-21.md)。新增浏览器链路测试会启动隔离 Flask、临时数据库和本地 HTTP 上游，不使用真实卡密或支付服务。
+
 ### 全量自动化回归命令
 
 ```powershell
@@ -257,7 +259,7 @@ node --test tests/account-import.test.mjs tests/googlemail-local-copy.test.mjs t
 npm --prefix googlemail test
 
 # 4. 运行 Playwright 浏览器端全量回归测试
-node --test tests/frontend-ui.test.mjs
+node --test tests/frontend-ui.test.mjs tests/recharge-ui.test.mjs tests/recharge-flow.test.mjs
 ```
 
 ***

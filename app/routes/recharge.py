@@ -122,8 +122,11 @@ def enforce_request_safety():
     rejected = protect_write_request()
     if rejected:
         return rejected
-    if request.method in ('POST', 'PUT', 'PATCH') and not isinstance(request.get_json(silent=True), dict):
-        return error_response('请求格式错误，必须为 JSON 对象', 400)
+    if request.method in ('POST', 'PUT', 'PATCH'):
+        if not request.is_json:
+            return error_response('请求媒体类型错误，必须使用 application/json', 415)
+        if not isinstance(request.get_json(silent=True), dict):
+            return error_response('请求格式错误，必须为 JSON 对象', 400)
 
     if request.endpoint not in {'recharge.get_config', 'recharge.get_agreement', 'recharge.get_features'}:
         return limit_recharge_request()
@@ -154,7 +157,7 @@ def get_features():
 
 @recharge_bp.route('/stats/avg-processing-time', methods=['GET'])
 def get_avg_processing_time():
-    """获取各套餐平均履约耗时（近 7 天）"""
+    """返回沙箱参考耗时；live 未接入真实统计时返回空列表。"""
     product = request.args.get('product', 'gpt')
     category = request.args.get('category', 'card')
     items = RechargeService.get_avg_processing_time(product, category)
@@ -364,11 +367,17 @@ def download_invoice():
         return error_response('真实账单下载尚未完成授权契约验收，当前不可用', 503)
 
     data = request.get_json(silent=True) or {}
-    code = data.get('redeem_code')
-    if code is None:
-        code = data.get('slug')
+    redeem_code = data.get('redeem_code')
+    invoice_slug = data.get('slug')
+    if redeem_code is not None and invoice_slug is not None:
+        return error_response('卡密与账单标识不能同时提交', 400)
+    code = redeem_code if redeem_code is not None else invoice_slug
     if not isinstance(code, str) or not 1 <= len(code.strip()) <= 128:
         return error_response('缺少卡密或任务编号参数', 400)
+
+    file_type = data.get('file_type', 'txt')
+    if not isinstance(file_type, str) or file_type not in RechargeService.INVOICE_FILE_TYPES:
+        return error_response('账单文件类型无效', 400)
 
     safe_code = code.strip()
     if any(ord(char) < 0x20 or ord(char) == 0x7f for char in safe_code):
@@ -396,10 +405,13 @@ def download_invoice():
             filename = f"receipt-{billing_inv.get('id', safe_code)[:16]}.txt"
             return Response(
                 content.encode('utf-8'),
-                mimetype='text/plain; charset=utf-8',
+                content_type='text/plain; charset=utf-8',
                 headers={'Content-Disposition': f'attachment; filename="{filename}"'}
             )
         return error_response('未找到关联任务，无法生成对账凭据', 404)
+
+    if not RechargeTaskAccess.permits_current_session(task.task_no):
+        return error_response('当前会话无权下载该任务的对账凭据', 403)
 
     if task.status != 'completed':
         return error_response('充值任务尚未完成，暂无法生成对账凭据', 409)
@@ -427,7 +439,7 @@ def download_invoice():
     filename = f"receipt-{task.task_no[:16]}.txt"
     return Response(
         content.encode('utf-8'),
-        mimetype='text/plain; charset=utf-8',
+        content_type='text/plain; charset=utf-8',
         headers={'Content-Disposition': f'attachment; filename="{filename}"'}
     )
 
@@ -493,13 +505,15 @@ def billing_invoice_file():
     if mode != 'mock':
         return error_response('真实账单文件尚未完成授权契约验收，当前不可用', 503)
     data = request.get_json(silent=True) or {}
-    slug = data.get('slug', 'default')
+    slug = data.get('slug')
     file_type = data.get('file_type', 'txt')
     if not isinstance(slug, str) or not 1 <= len(slug.strip()) <= 128:
         return error_response('账单标识必须是 1-128 个字符的文本', 400)
     if not isinstance(file_type, str) or file_type not in RechargeService.INVOICE_FILE_TYPES:
         return error_response('账单文件类型无效', 400)
     slug = slug.strip()
+    if any(ord(char) < 0x20 or ord(char) == 0x7f for char in slug):
+        return error_response('账单标识格式无效', 400)
     return success_response({
         'url': '/api/recharge/tasks/invoice/download',
         'method': 'POST',

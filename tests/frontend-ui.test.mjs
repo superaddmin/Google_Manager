@@ -352,7 +352,7 @@ test('recharge agreement renders safe formatting without executable HTML', async
     }),
   });
 
-  await app.page.getByPlaceholder('请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）').fill('PLUS-AGREEMENT-TEST');
+  await app.page.getByPlaceholder(/CDK 卡密（如/).fill('PLUS-AGREEMENT-TEST');
   await app.page.getByRole('button', { name: '验证卡密', exact: true }).click();
   await waitForVisible(app, app.page.getByText('卡密已核验有效'), 'agreement test CDK');
   await app.page.getByRole('button', { name: '《充值用户服务协议与免责声明》' }).click();
@@ -383,7 +383,7 @@ test('recharge masks sensitive credentials by default without changing pasted co
       data: { plan_type: 'PLUS', is_renewal_supported: false },
     }),
   });
-  const cdk = app.page.getByPlaceholder('请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）');
+  const cdk = app.page.getByPlaceholder(/CDK 卡密（如/);
   assert.equal(await cdk.getAttribute('type'), 'password');
   await cdk.fill('PLUS-SENSITIVE-CDK');
   await app.page.getByRole('button', { name: '显示CDK 卡密' }).click();
@@ -499,7 +499,7 @@ test('recharge clears and disables renewal when the validated CDK does not suppo
       } })(route);
     },
   });
-  const cdkInput = app.page.getByPlaceholder('请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）');
+  const cdkInput = app.page.getByPlaceholder(/CDK 卡密（如/);
   const renewal = app.page.getByRole('checkbox', { name: /仅续费模式/ });
 
   await cdkInput.fill('PLUS-RENEW-YES');
@@ -537,7 +537,7 @@ test('editing a CDK while validation is pending re-enables validation', async te
       }
     },
   });
-  const input = app.page.getByPlaceholder('请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）');
+  const input = app.page.getByPlaceholder(/CDK 卡密（如/);
   const validateButton = app.page.getByRole('button', { name: '验证卡密', exact: true });
 
   await input.fill('PLUS-FIRST-PENDING');
@@ -557,7 +557,7 @@ test('recharge keeps renewal disabled when upstream omits its capability flag', 
       plan_type: 'PLUS',
     } }),
   });
-  const cdkInput = app.page.getByPlaceholder('请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）');
+  const cdkInput = app.page.getByPlaceholder(/CDK 卡密（如/);
   const renewal = app.page.getByRole('checkbox', { name: /仅续费模式/ });
 
   await cdkInput.fill('PLUS-RENEW-UNKNOWN');
@@ -581,7 +581,7 @@ test('recharge refreshes the parsed email and clears confirmation when credentia
   const first = JSON.stringify({ accessToken: 'synthetic-a', user: { email: 'first@example.test' } });
   const second = JSON.stringify({ accessToken: 'synthetic-b', user: { email: 'second@example.test' } });
 
-  await app.page.getByPlaceholder('请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）').fill('PLUS-CREDENTIAL-TEST');
+  await app.page.getByPlaceholder(/CDK 卡密（如/).fill('PLUS-CREDENTIAL-TEST');
   await app.page.getByRole('button', { name: '验证卡密', exact: true }).click();
   await waitForVisible(app, app.page.getByText('卡密已核验有效'), 'credential-change CDK');
   await credential.fill(first);
@@ -624,7 +624,7 @@ test('recharge submission binds identical credentials and clears them after succ
       });
     },
   });
-  await app.page.getByPlaceholder('请输入 16-32 位 CDK 卡密（如 PLUS-XXXX-XXXX）').fill(task.redeem_code);
+  await app.page.getByPlaceholder(/CDK 卡密（如/).fill(task.redeem_code);
   await app.page.getByRole('button', { name: '验证卡密', exact: true }).click();
   await waitForVisible(app, app.page.getByText('卡密已核验有效'), 'verified CDK');
   const credential = app.page.getByPlaceholder('粘贴来自 chatgpt.com/api/auth/session 的完整 JSON，或输入 user@example.com----sk-ant-sid02-xxx');
@@ -921,10 +921,13 @@ test('recharge serializes billing mutations before refreshing status', async tes
   releaseCancellation.resolve();
   await waitForSignal(refreshStarted.promise, 'billing refresh after cancellation');
   assert.equal(
-    await app.page.getByRole('button', { name: '取消自动续费', exact: true }).isDisabled(),
+    await app.page.getByRole('button', { name: '查询账单状态', exact: true }).isDisabled(),
     true,
     'the mutation lock must remain active until the billing refresh finishes',
   );
+  assert.equal(await app.page.getByRole('button', { name: '取消自动续费', exact: true }).count(), 0,
+    'refreshing must hide the previous actionable subscription result');
+  assert.equal(await app.page.getByPlaceholder(/输入账号 accessToken/).isDisabled(), true);
   releaseRefresh.resolve();
   await waitForVisible(app, app.page.getByText('已关闭自动续费', { exact: true }), 'refreshed billing status');
   assert.equal(queryCount, 2, 'a successful mutation should trigger exactly one status refresh');

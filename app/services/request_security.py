@@ -76,11 +76,12 @@ def limit_recharge_request():
         return response, 429
     payload = request.get_json(silent=True) or {}
 
-    # 批量查询的业务上限是 50 项。IP 桶按 HTTP 请求计数保持兼容，
-    # 对有效且去重后的卡密逐项限流，避免同一卡密被批量查询绕过卡密桶。
+    # 批量查询的业务上限是 50 个去重后的卡密。IP 桶按 HTTP 请求计数保持兼容，
+    # 对有效且去重后的卡密逐项限流；不能按原始数组长度提前跳过，否则攻击者可
+    # 通过填充重复卡密绕过卡密桶。
     batch_codes = []
     raw_batch = payload.get('redeem_codes') if isinstance(payload, dict) else None
-    if isinstance(raw_batch, list) and len(raw_batch) <= 50:
+    if isinstance(raw_batch, list):
         seen = set()
         for raw_code in raw_batch:
             if not isinstance(raw_code, str):
@@ -89,6 +90,11 @@ def limit_recharge_request():
             if code and code not in seen:
                 seen.add(code)
                 batch_codes.append(code)
+                if len(batch_codes) > 50:
+                    # 业务层会拒绝超过 50 个不同卡密的请求；这里不消耗任一卡密
+                    # 的额度，避免无效请求污染合法卡密的独立限流桶。
+                    batch_codes.clear()
+                    break
 
     if batch_codes:
         for code in batch_codes:

@@ -6,6 +6,8 @@
 import re
 import time
 import uuid
+import io
+import http.client
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -57,6 +59,85 @@ class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _DeadlineSocketReader(io.RawIOBase):
+    """Apply one absolute deadline to every response-header/body socket read."""
+
+    def __init__(self, sock, deadline):
+        super().__init__()
+        self._socket = sock
+        self._deadline = deadline
+        self._raw = sock.makefile('rb', buffering=0)
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('upstream response deadline exceeded')
+        self._socket.settimeout(remaining)
+        return self._raw.readinto(buffer)
+
+    def close(self):
+        try:
+            if not self.closed:
+                self._raw.close()
+        finally:
+            super().close()
+
+
+class _DeadlineHTTPResponse(http.client.HTTPResponse):
+    """HTTPResponse whose status line, headers, and body share one deadline."""
+
+    def __init__(self, sock, *args, deadline, **kwargs):
+        super().__init__(sock, *args, **kwargs)
+        original_fp = self.fp
+        try:
+            self.deadline = deadline
+            self.fp = io.BufferedReader(_DeadlineSocketReader(sock, deadline))
+        finally:
+            original_fp.close()
+
+
+class _DeadlineConnectionMixin:
+    def __init__(self, *args, **kwargs):
+        timeout = kwargs.get('timeout')
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError('upstream timeout must be a positive number')
+        super().__init__(*args, **kwargs)
+        deadline = time.monotonic() + timeout
+        self.response_class = lambda sock, *response_args, **response_kwargs: (
+            _DeadlineHTTPResponse(
+                sock,
+                *response_args,
+                deadline=deadline,
+                **response_kwargs,
+            )
+        )
+
+
+class _DeadlineHTTPConnection(_DeadlineConnectionMixin, http.client.HTTPConnection):
+    pass
+
+
+class _DeadlineHTTPSConnection(_DeadlineConnectionMixin, http.client.HTTPSConnection):
+    pass
+
+
+class _DeadlineHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_DeadlineHTTPConnection, req)
+
+
+class _DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(
+            _DeadlineHTTPSConnection,
+            req,
+            context=self._context,
+        )
+
+
 class RechargeService:
     """充值与交付核心业务服务"""
 
@@ -82,6 +163,7 @@ class RechargeService:
         'upstream_api', 'provider_console', 'provider_ticket',
     }
     MAX_UPSTREAM_RESPONSE_BYTES = 1024 * 1024
+    UPSTREAM_READ_CHUNK_BYTES = 64 * 1024
     VALIDATION_PUBLIC_FIELDS = {
         'product', 'plan_type', 'plan_name', 'status', 'is_mock',
         'account_change_locked', 'is_renewal_supported',
@@ -168,8 +250,10 @@ class RechargeService:
 
     @classmethod
     def get_avg_processing_time(cls, product="gpt", category="card"):
-        """获取各套餐平均履约耗时（近 7 天）"""
-        cls.ensure_enabled()
+        """返回 mock 沙箱参考耗时；live 无真实统计源时返回空列表。"""
+        mode = cls.ensure_enabled()
+        if mode != 'mock':
+            return []
         return [
             {"plan_type": "PLUS", "plan_name": "ChatGPT Plus", "avg_seconds": 780.0},
             {"plan_type": "PRO", "plan_name": "ChatGPT Pro", "avg_seconds": 960.0},
@@ -281,7 +365,7 @@ class RechargeService:
 
         if mode == 'live':
             upstream_res = cls._upstream_post("/user/redeem-codes/validate", {"redeem_code": code})
-            if not upstream_res or not upstream_res.get("ok"):
+            if not isinstance(upstream_res, dict) or upstream_res.get("ok") is not True:
                 raise RechargeUpstreamError("上游校验卡密失败，请稍后查询")
             return cls._public_validation_result(upstream_res.get("result", {}))
 
@@ -1075,9 +1159,9 @@ class RechargeService:
         operation = db.session.get(RechargeOperation, task.task_no)
         # 初次受理必须回显本地幂等号；后续尚未绑定远端编号时，至少
         # 回显本地任务号或精确卡密，避免仅凭状态把其它任务写回本地。
+        client_matches = remote.get('client_task_no') == task.task_no
+        code_matches = remote.get('redeem_code') == task.redeem_code
         if not operation or not operation.upstream_task_no:
-            client_matches = remote.get('client_task_no') == task.task_no
-            code_matches = remote.get('redeem_code') == task.redeem_code
             if require_client_task_no and not client_matches:
                 raise RechargeUpstreamError('上游任务缺少本地关联编号，拒绝回写状态')
             if not require_client_task_no and not (client_matches or code_matches):
@@ -1097,8 +1181,11 @@ class RechargeService:
             ):
                 raise RechargeUpstreamError('上游任务编号格式无效')
             upstream_no = upstream_no.strip()
-        if operation and operation.upstream_task_no and upstream_no not in (None, operation.upstream_task_no):
-            raise RechargeUpstreamError('上游任务编号与已关联任务不匹配')
+        if operation and operation.upstream_task_no:
+            if upstream_no is None and not (client_matches or code_matches):
+                raise RechargeUpstreamError('上游任务缺少已关联任务编号或可验证的本地身份，拒绝回写状态')
+            if upstream_no is not None and upstream_no != operation.upstream_task_no:
+                raise RechargeUpstreamError('上游任务编号与已关联任务不匹配')
         if upstream_no and RechargeOperation.query.filter(
             RechargeOperation.upstream_task_no == upstream_no,
             RechargeOperation.task_no != task.task_no,
@@ -1199,7 +1286,7 @@ class RechargeService:
         task = cls._find_latest_task_by_code(code)
         if mode == 'live':
             upstream_res = cls._upstream_post("/user/tasks/lookup", {"redeem_code": code})
-            if not isinstance(upstream_res, dict) or not upstream_res.get('ok'):
+            if not isinstance(upstream_res, dict) or upstream_res.get('ok') is not True:
                 raise RechargeUpstreamError('上游任务查询失败，本地状态未变更')
             if task:
                 return cls._reconcile_task(task, upstream_res.get('task'))
@@ -1244,7 +1331,7 @@ class RechargeService:
                 upstream_res = cls._upstream_post('/user/tasks/lookup', {'redeem_code': task.redeem_code})
             else:
                 upstream_res = cls._upstream_get(f"/user/tasks/{urllib.parse.quote(operation.upstream_task_no, safe='')}")
-            if not isinstance(upstream_res, dict) or not upstream_res.get('ok'):
+            if not isinstance(upstream_res, dict) or upstream_res.get('ok') is not True:
                 raise RechargeUpstreamError('上游任务查询失败，本地状态未变更')
             cls._reconcile_task(task, upstream_res.get('task'))
         return task.to_public_dict()
@@ -1274,7 +1361,7 @@ class RechargeService:
 
         if mode == 'live':
             upstream_res = cls._upstream_post("/user/tasks/lookup-batch", {"redeem_codes": clean_codes})
-            if upstream_res and upstream_res.get("ok"):
+            if isinstance(upstream_res, dict) and upstream_res.get("ok") is True:
                 results = upstream_res.get('results')
                 if not isinstance(results, list):
                     raise RechargeUpstreamError('上游批量查询结果格式无效')
@@ -1303,7 +1390,7 @@ class RechargeService:
                         'ok': result.get('ok') is True,
                         'redeem_code': code,
                     }
-                    if task and result.get('ok'):
+                    if task and result.get('ok') is True:
                         remote_task = result.get('task', result)
                         if isinstance(remote_task, dict) and remote_task is not result:
                             remote_task = dict(remote_task)
@@ -1511,7 +1598,7 @@ class RechargeService:
             credential_hash = cls._billing_credential_hash(token)
             mutation_snapshot = RechargeBillingMutation.snapshot(credential_hash)
             upstream_res = cls._upstream_post("/tools/billing/query", {"token_input": token})
-            if not upstream_res or not upstream_res.get("ok"):
+            if not isinstance(upstream_res, dict) or upstream_res.get("ok") is not True:
                 raise RechargeUpstreamError("查询上游账单状态失败，请稍后重试")
             public = cls._public_billing_result(upstream_res.get("result", {}))
             RechargeBillingMutation.reconcile_query(
@@ -1650,7 +1737,7 @@ class RechargeService:
     # ---------------- 上游通信适配层 ----------------
 
     @classmethod
-    def _read_upstream_json(cls, response):
+    def _read_upstream_json(cls, response, timeout=8):
         content_length = response.headers.get('Content-Length') if response.headers else None
         try:
             if content_length is not None and int(content_length) > cls.MAX_UPSTREAM_RESPONSE_BYTES:
@@ -1658,9 +1745,31 @@ class RechargeService:
         except (TypeError, ValueError):
             # 非法 Content-Length 交给实际读取上限处理，不信任该 header。
             pass
-        raw = response.read(cls.MAX_UPSTREAM_RESPONSE_BYTES + 1)
-        if not isinstance(raw, (bytes, bytearray)) or len(raw) > cls.MAX_UPSTREAM_RESPONSE_BYTES:
-            raise RechargeUpstreamError('上游响应过大或格式无效')
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise RechargeUpstreamError('上游响应读取超时配置无效')
+        deadline = getattr(response, 'deadline', time.monotonic() + timeout)
+        reader = getattr(response, 'read1', None)
+        if not callable(reader):
+            reader = response.read
+        raw = bytearray()
+        while len(raw) <= cls.MAX_UPSTREAM_RESPONSE_BYTES:
+            if time.monotonic() >= deadline:
+                raise RechargeUpstreamError('上游响应读取超时')
+            chunk = reader(min(
+                cls.UPSTREAM_READ_CHUNK_BYTES,
+                cls.MAX_UPSTREAM_RESPONSE_BYTES + 1 - len(raw),
+            ))
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise RechargeUpstreamError('上游响应过大或格式无效')
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > cls.MAX_UPSTREAM_RESPONSE_BYTES:
+                raise RechargeUpstreamError('上游响应过大或格式无效')
+            # read1 performs at most one raw socket read. That in-flight read may
+            # cross the deadline once, but remains bounded by urllib's socket timeout.
+            if time.monotonic() >= deadline:
+                raise RechargeUpstreamError('上游响应读取超时')
         try:
             return json.loads(bytes(raw).decode('utf-8'))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -1728,9 +1837,13 @@ class RechargeService:
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GoogleManager/1.0"
                 }
             )
-            opener = urllib.request.build_opener(_RejectRedirectHandler())
+            opener = urllib.request.build_opener(
+                _RejectRedirectHandler(),
+                _DeadlineHTTPHandler(),
+                _DeadlineHTTPSHandler(),
+            )
             with opener.open(req, timeout=timeout) as resp:
-                return cls._read_upstream_json(resp)
+                return cls._read_upstream_json(resp, timeout=timeout)
         except urllib.error.HTTPError as err:
             err.close()
             return {'ok': False, 'message': f'上游接口返回错误 HTTP {err.code}'}
@@ -1750,9 +1863,13 @@ class RechargeService:
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GoogleManager/1.0"
                 }
             )
-            opener = urllib.request.build_opener(_RejectRedirectHandler())
+            opener = urllib.request.build_opener(
+                _RejectRedirectHandler(),
+                _DeadlineHTTPHandler(),
+                _DeadlineHTTPSHandler(),
+            )
             with opener.open(req, timeout=timeout) as resp:
-                return cls._read_upstream_json(resp)
+                return cls._read_upstream_json(resp, timeout=timeout)
         except urllib.error.HTTPError as err:
             err.close()
             return {'ok': False, 'message': f'上游接口返回错误 HTTP {err.code}'}
