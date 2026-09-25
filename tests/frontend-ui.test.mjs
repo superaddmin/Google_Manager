@@ -150,7 +150,7 @@ function assertPageClean(app) {
   );
 }
 
-async function openApp(t, { storage = {}, apiRoutes = {}, path = '/admin' } = {}) {
+async function openApp(t, { storage = {}, apiRoutes = {}, path = '/Googlemail' } = {}) {
   const context = await browser.newContext();
   t.after(() => context.close());
 
@@ -232,7 +232,8 @@ before(async () => {
       }
 
       const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
-      const isAppRoute = pathname === '/' || pathname === '/recharge' || pathname === '/admin' || pathname.startsWith('/admin/');
+      const isAppRoute = pathname === '/' ||
+        ['/recharge', '/admin', '/Googlemail'].some(prefix => pathname === prefix || pathname.startsWith(`${prefix}/`));
       const relativePath = isAppRoute ? 'index.html' : pathname.slice(1);
       const filePath = resolve(staticRoot, relativePath);
       if (!filePath.startsWith(`${staticRoot}${sep}`)) {
@@ -278,7 +279,7 @@ after(async () => {
 
 async function openRecharge(testContext, routes = {}, mode = 'mock') {
   const app = await openApp(testContext, {
-    path: '/recharge',
+    path: '/recharge?service=legacy',
     apiRoutes: {
       'GET /api/recharge/config': jsonRoute({ success: true, data: { mode, enabled: true } }),
       'GET /api/recharge/stats/avg-processing-time': jsonRoute({ success: true, data: [] }),
@@ -290,9 +291,9 @@ async function openRecharge(testContext, routes = {}, mode = 'mock') {
   return app;
 }
 
-test('public recharge and admin portals have separate entry points', async testContext => {
+test('public recharge, Googlemail and recharge admin have separate entry points', async testContext => {
   const recharge = await openRecharge(testContext);
-  assert.equal(await recharge.page.getByText('GoogleManager 充值中心', { exact: true }).count(), 1);
+  assert.equal(await recharge.page.getByText('Chat GPT充值中心', { exact: true }).count(), 1);
   assert.equal(await recharge.page.getByRole('button', { name: '账号列表' }).count(), 0);
   assert.equal(await recharge.page.getByRole('button', { name: '从账号库选择账号' }).count(), 0);
   assert.equal(await recharge.page.getByText('选择 Google 资产库账号', { exact: true }).count(), 0);
@@ -302,10 +303,226 @@ test('public recharge and admin portals have separate entry points', async testC
       'GET /api/auth/check': jsonRoute({ success: false, authenticated: false, banned: false }),
     },
   });
-  await waitForVisible(admin, admin.page.getByRole('heading', { name: 'GoogleManager' }), 'admin login');
+  await waitForVisible(admin, admin.page.getByRole('heading', { name: 'Googlemail' }), 'mail login');
   assert.equal(await admin.page.getByText('请输入管理员密码以访问系统').count(), 1);
+  const rechargeAdmin = await openApp(testContext, {
+    path: '/admin?tab=orders',
+    apiRoutes: {
+      'GET /api/auth/check': jsonRoute({ success: true, authenticated: false, banned: false }),
+    },
+  });
+  await waitForVisible(rechargeAdmin, rechargeAdmin.page.getByText('登录充值管理后台'), 'recharge admin login');
+  assert.equal(await rechargeAdmin.page.title(), 'Chat GPT充值中心 · 管理后台');
+  assertPageClean(rechargeAdmin);
   assertPageClean(recharge);
   assertPageClean(admin);
+});
+
+test('main admin embeds CDK login and preserves separate legacy authentication', async testContext => {
+  const app = await openApp(testContext, {
+    path: '/admin',
+    apiRoutes: {
+      'GET /api/cdk/config': jsonRoute({ success: true, data: { enabled: true, fulfillment_enabled: false } }),
+      'GET /api/cdk/admin/session': jsonRoute({ success: false, message: '请先登录' }, 401),
+      'GET /api/auth/check': jsonRoute({ success: true, authenticated: false, banned: false }),
+    },
+  });
+  await waitForVisible(app, app.page.getByRole('button', { name: '登录卡密工作台' }), 'embedded CDK login');
+  assert.equal(await app.page.getByLabel('用户名', { exact: true }).count(), 1);
+  const modules = app.page.getByRole('navigation', { name: '充值后台模块' });
+  assert.equal(await modules.getByRole('link', { name: 'CDK 卡密管理' }).getAttribute('aria-current'), 'page');
+  await modules.getByRole('link', { name: '原充值订单' }).click();
+  await waitForVisible(app, app.page.getByText('登录充值管理后台'), 'legacy order login');
+  assert.equal(await app.page.getByLabel('用户名', { exact: true }).count(), 0);
+  await modules.getByRole('link', { name: 'CDK 卡密管理' }).click();
+  await waitForVisible(app, app.page.getByRole('button', { name: '登录卡密工作台' }), 'return to CDK login');
+  await app.page.goto(`${baseUrl}/admin/cdk`);
+  await waitForVisible(app, app.page.getByRole('button', { name: '登录卡密工作台' }), 'CDK admin alias');
+  assertPageClean(app);
+});
+
+test('home and recharge aliases embed CDK redemption with a disabled fulfillment guard', async testContext => {
+  const app = await openApp(testContext, {
+    path: '/',
+    apiRoutes: {
+      'GET /api/cdk/config': jsonRoute({ success: true, data: { enabled: true, claim_enabled: false, fulfillment_enabled: false } }),
+      'GET /api/cdk/customer/me': jsonRoute({ success: true, data: null }),
+      'POST /api/cdk/validate': jsonRoute({ success: true, data: {
+        masked_code: 'GM1…0000', benefit: { name: 'Plus 测试权益', plan_type: 'PLUS' }, expires_at: 2000000000,
+      } }),
+      'GET /api/recharge/config': jsonRoute({ success: true, data: { mode: 'disabled', enabled: false } }),
+      'GET /api/recharge/stats/avg-processing-time': jsonRoute({ success: true, data: [] }),
+      'GET /api/recharge/agreement': jsonRoute({ success: true, data: { content: 'Synthetic agreement' } }),
+    },
+  });
+  for (const path of ['/', '/recharge', '/recharge/cdk']) {
+    if (path !== '/') await app.page.goto(`${baseUrl}${path}`);
+    await waitForVisible(app, app.page.getByRole('heading', { name: 'CDK 卡密充值' }), 'default platform CDK form');
+    await waitForVisible(app, app.page.getByRole('status').filter({ hasText: '充值通道暂未开放' }), 'disabled fulfillment notice');
+    assert.equal(await app.page.title(), 'Chat GPT充值中心');
+  }
+  await app.page.getByLabel('平台卡密', { exact: true }).fill('GM1' + '0'.repeat(27));
+  await app.page.getByRole('button', { name: '验证卡密', exact: true }).click();
+  await waitForVisible(app, app.page.getByLabel('目标账号邮箱', { exact: true }), 'validated card');
+  await app.page.getByLabel('Session JSON', { exact: true }).fill(JSON.stringify({ accessToken: 'synthetic', user: { email: 'cdk@example.test' } }));
+  await app.page.getByLabel('目标账号邮箱', { exact: true }).fill('cdk@example.test');
+  await app.page.getByRole('checkbox').check();
+  assert.equal(await app.page.getByRole('button', { name: '确认核销' }).isDisabled(), true);
+  const services = app.page.getByRole('navigation', { name: '充值服务' });
+  await services.getByRole('link', { name: '原卡密订单与订阅服务' }).click();
+  await waitForVisible(app, app.page.getByRole('heading', { name: '自助充值与订单服务' }), 'legacy service navigation');
+  assert.deepEqual(await app.page.evaluate(() => window.__cspViolations), []);
+  assertPageClean(app);
+});
+
+function rechargeAdminFixture(mode = 'mock') {
+  const task = {
+    task_no: 'TK-ADMIN-UI', account_email: 'admin-ui@example.test', redeem_code_last4: '1234',
+    status: 'processing', plan_type: 'PLUS', created_at: '2026-09-25 10:00:00', updated_at: '2026-09-25 10:00:00',
+  };
+  const detail = {
+    task, upstream_task_no: null, mutation: null, reconciliation: null, mutation_reconciliations: [],
+    actions: { refresh: mode !== 'disabled', recall: mode !== 'disabled', close: false, reconcile_task: false, reconcile_mutation: false },
+  };
+  return {
+    detail,
+    routes: {
+      'GET /api/auth/check': jsonRoute({ success: true, authenticated: true, banned: false }),
+      'GET /api/recharge/admin/overview': jsonRoute({ success: true, data: { mode, total: 1, counts: { processing: 1 }, pending_review: 0 } }),
+      'GET /api/recharge/admin/tasks': jsonRoute({ success: true, data: { items: [task], total: 1, page: 1, page_size: 20 } }),
+      'GET /api/recharge/admin/tasks/TK-ADMIN-UI': route => jsonRoute({ success: true, data: detail })(route),
+    },
+  };
+}
+
+test('recharge admin filters, paginates and reads disabled orders without mutations', async testContext => {
+  const fixture = rechargeAdminFixture('disabled');
+  const queries = [];
+  const app = await openApp(testContext, {
+    path: '/admin?tab=orders',
+    apiRoutes: {
+      ...fixture.routes,
+      'GET /api/recharge/admin/tasks': (route, request) => {
+        const query = Object.fromEntries(new URL(request.url()).searchParams);
+        queries.push(query);
+        return jsonRoute({ success: true, data: { items: [fixture.detail.task], total: 21, page: Number(query.page), page_size: 20 } })(route);
+      },
+    },
+  });
+  await waitForVisible(app, app.page.getByText('充值履约当前未启用，可查询历史订单。'), 'disabled admin');
+  await app.page.getByRole('button', { name: '下一页' }).click();
+  await waitForVisible(app, app.page.getByText('共 21 条 · 第 2 / 2 页'), 'second page');
+  await app.page.getByLabel('搜索订单').fill('admin-ui@example.test');
+  await app.page.getByRole('button', { name: '查询', exact: true }).click();
+  await waitForVisible(app, app.page.getByText('共 21 条 · 第 1 / 2 页'), 'search resets pagination');
+  assert.equal(queries.at(-1).q, 'admin-ui@example.test');
+  await app.page.getByRole('button', { name: '查看详情' }).click();
+  const refresh = app.page.getByRole('button', { name: '同步上游状态' });
+  await waitForVisible(app, refresh, 'detail actions');
+  for (const label of ['同步上游状态', '撤回订单', '关闭订单']) {
+    assert.equal(await app.page.getByRole('button', { name: label, exact: true }).isDisabled(), true);
+  }
+  await app.page.setViewportSize({ width: 375, height: 812 });
+  const dimensions = await app.page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
+  assert.ok(dimensions[0] <= dimensions[1] + 1, 'admin mobile layout must fit the viewport');
+  assertPageClean(app);
+});
+
+test('recharge admin requires confirmation and refreshes after a failed operation', async testContext => {
+  const fixture = rechargeAdminFixture();
+  let attempts = 0;
+  const app = await openApp(testContext, {
+    path: '/admin?tab=orders',
+    apiRoutes: {
+      ...fixture.routes,
+      'POST /api/recharge/admin/tasks/TK-ADMIN-UI/recall': (route, request) => {
+        attempts += 1;
+        assert.deepEqual(request.postDataJSON(), { confirmed: true });
+        if (attempts === 1) return jsonRoute({ success: false, message: '上游超时，请核对订单' }, 503)(route);
+        fixture.detail.task.status = 'recalled';
+        fixture.detail.actions.recall = false;
+        return jsonRoute({ success: true, data: fixture.detail })(route);
+      },
+    },
+  });
+  await app.page.getByRole('button', { name: '查看详情' }).click();
+  const recall = app.page.getByRole('button', { name: '撤回订单' });
+  app.page.once('dialog', dialog => dialog.dismiss());
+  await recall.click();
+  assert.equal(attempts, 0);
+  app.page.once('dialog', dialog => dialog.accept());
+  await recall.click();
+  await waitForVisible(app, app.page.getByRole('alert').filter({ hasText: '上游超时，请核对订单' }), 'upstream error');
+  app.page.once('dialog', dialog => dialog.accept());
+  await recall.click();
+  await waitForVisible(app, app.page.getByRole('alert').filter({ hasText: '订单操作已完成' }), 'recall success');
+  await waitForVisible(app, app.page.getByRole('complementary').getByText('已撤回', { exact: true }), 'recalled state');
+  assert.equal(attempts, 2);
+  assert.equal(await recall.isDisabled(), true);
+  assertPageClean(app);
+});
+
+test('recharge admin submits exact unknown-operation evidence to the reconciliation API', async testContext => {
+  const fixture = rechargeAdminFixture('live');
+  fixture.detail.mutation = { operation_id: 'operation-001', action: 'recall', state: 'unknown' };
+  fixture.detail.actions = { refresh: true, recall: false, close: false, reconcile_task: false, reconcile_mutation: true };
+  let submission;
+  const app = await openApp(testContext, {
+    path: '/admin?tab=orders',
+    apiRoutes: {
+      ...fixture.routes,
+      'POST /api/recharge/admin/tasks/TK-ADMIN-UI/mutations/operation-001/reconcile': (route, request) => {
+        submission = request.postDataJSON();
+        fixture.detail.actions.reconcile_mutation = false;
+        fixture.detail.mutation.state = 'failed';
+        fixture.detail.mutation_reconciliations = [{ operation_id: 'operation-001', resolution: 'not_applied', evidence_reference: 'TICKET-20260925', final_status: 'processing' }];
+        return jsonRoute({ success: true })(route);
+      },
+    },
+  });
+  await app.page.getByRole('button', { name: '查看详情' }).click();
+  await app.page.getByLabel('证据引用编号').fill('TICKET-20260925');
+  await app.page.getByLabel('证据 SHA-256').fill('a'.repeat(64));
+  await app.page.getByLabel('证据观测时间').fill('2026-09-25T10:00');
+  await app.page.getByLabel('上游任务号').fill('UPSTREAM-001');
+  await app.page.getByLabel('未执行依据').fill('Provider confirmed no recall was applied.');
+  await app.page.getByRole('checkbox').check();
+  await app.page.getByRole('button', { name: '提交人工对账' }).click();
+  await waitForVisible(app, app.page.getByText('TICKET-20260925 · processing'), 'audit record');
+  assert.equal(submission.resolution, 'not_applied');
+  assert.equal(submission.confirmed, true);
+  assert.equal(submission.action, 'recall');
+  assert.equal(submission.upstream_task.client_task_no, 'TK-ADMIN-UI');
+  assert.equal(submission.evidence.sha256, 'a'.repeat(64));
+  assert.match(submission.evidence.observed_at, /Z$/);
+  assertPageClean(app);
+});
+
+test('recharge admin expires a session without reloading private task details', async testContext => {
+  const fixture = rechargeAdminFixture();
+  let authenticated = true;
+  let detailReads = 0;
+  const app = await openApp(testContext, {
+    path: '/admin?tab=orders',
+    apiRoutes: {
+      ...fixture.routes,
+      'GET /api/auth/check': route => jsonRoute({ success: true, authenticated, banned: false })(route),
+      'GET /api/recharge/admin/tasks/TK-ADMIN-UI': route => {
+        detailReads += 1;
+        return jsonRoute({ success: true, data: fixture.detail })(route);
+      },
+      'POST /api/recharge/admin/tasks/TK-ADMIN-UI/refresh': route => {
+        authenticated = false;
+        return jsonRoute({ success: false, message: '请重新登录' }, 401)(route);
+      },
+    },
+  });
+  await app.page.getByRole('button', { name: '查看详情' }).click();
+  await app.page.getByRole('button', { name: '同步上游状态' }).click();
+  await waitForVisible(app, app.page.getByPlaceholder('请输入密码'), 'expired admin session');
+  assert.equal(detailReads, 1);
+  assert.equal(await app.page.getByText('admin-ui@example.test', { exact: true }).count(), 0);
+  assertPageClean(app);
 });
 
 test('recharge assets and API calls load under the production content security policy', async testContext => {
@@ -1121,7 +1338,7 @@ test('malformed darkMode storage still renders the login page', async testContex
 
   await waitForVisible(
     app,
-    app.page.getByRole('heading', { name: 'GoogleManager' }),
+    app.page.getByRole('heading', { name: 'Googlemail' }),
     'malformed darkMode storage prevented the login page from rendering',
   );
   await waitForVisible(

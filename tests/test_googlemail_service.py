@@ -273,8 +273,13 @@ class GooglemailTaskManagerTestCase(unittest.TestCase):
             chrome_executable,
         )
         task_dir = self.project_root / "runtime" / "tasks" / task["taskId"]
+        self.assertEqual(
+            captured_environment["USER_DATA_DIR"],
+            str(task_dir / "browser-data"),
+        )
         self.assertFalse((task_dir / "accounts.txt").exists())
         self.assertFalse((task_dir / "output" / "result.txt").exists())
+        self.assertFalse((task_dir / "browser-data").exists())
 
         db.session.expire_all()
         updated = db.session.get(Account, account_id)

@@ -21,6 +21,8 @@ def readiness():
     import time
     try:
         db.session.execute(text('SELECT 1'))
+        from app.services.schema_migration import probe_gmail_schema
+        probe_gmail_schema(db.engine)
         worker_required = current_app.config['BACKGROUND_TASK_MODE'] == 'queue'
         worker_ready = RuntimeQueue.state('worker').get('heartbeat', 0) > time.time() - 30
         maintenance = RuntimeQueue.state('maintenance')
@@ -51,6 +53,7 @@ def readiness():
                 validate_sensitive_data(
                     db.engine,
                     current_app.config.get('GMAIL_TOKEN_ENCRYPTION_KEY'),
+                    max_rows=20,
                 )
             except Exception:
                 sensitive_data_ready = False
@@ -59,11 +62,21 @@ def readiness():
             and gmail_ready and maintenance_ready and automation_ready
             and gmail_actions_ready and recharge_ready and sensitive_data_ready
         )
+        cdk_ready = True
+        if current_app.config.get('CDK_ENABLED'):
+            try:
+                from app.services.cdk_maintenance import validate_cdk
+                validate_cdk(limit=20)
+            except Exception:
+                cdk_ready = False
+        healthy = healthy and cdk_ready
         return {'ready': healthy, 'database': True, 'worker': worker_ready,
                 'gmailConfiguration': bool(gmail_ready), 'maintenance': maintenance_ready,
                 'automation': automation_ready, 'gmailActions': gmail_actions_ready,
                 'rechargeConfiguration': recharge_ready,
-                'sensitiveData': sensitive_data_ready}, 200 if healthy else 503
+                'cdkConfiguration': cdk_ready,
+                'sensitiveData': sensitive_data_ready,
+                'sensitiveDataSampleLimit': 20}, 200 if healthy else 503
     except Exception:
         try:
             db.session.rollback()
@@ -74,7 +87,10 @@ def readiness():
 
 @main_bp.route('/admin/<path:subpath>', strict_slashes=False)
 @main_bp.route('/admin', strict_slashes=False)
+@main_bp.route('/Googlemail/<path:subpath>', strict_slashes=False)
+@main_bp.route('/Googlemail', strict_slashes=False)
 @main_bp.route('/recharge', strict_slashes=False)
+@main_bp.route('/recharge/cdk', strict_slashes=False)
 @main_bp.route('/')
 def index(subpath=None):
     """

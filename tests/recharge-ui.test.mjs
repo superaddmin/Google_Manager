@@ -90,7 +90,7 @@ async function openRecharge(testContext, routes = {}, mode = 'mock', options = {
     await handler(route, request);
   });
 
-  await page.goto(`${baseUrl}/recharge`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${baseUrl}/recharge?service=legacy`, { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: '自助充值与订单服务' }).waitFor();
   return { page, unexpectedRequests };
 }

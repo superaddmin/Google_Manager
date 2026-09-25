@@ -62,6 +62,7 @@ class DeploymentPreflightTests(unittest.TestCase):
             'ADMIN_PASSWORD': 'StrongSyntheticPassword_123!',
             'SECRET_KEY': '0123456789abcdef' * 4,
             'GMAIL_TOKEN_ENCRYPTION_KEY': fernet_key,
+            'GMAIL_HTTP_TIMEOUT_SECONDS': '30',
             'GOOGLE_MANAGER_IMAGE': (
                 'registry.production.example.org/google-manager@sha256:' + 'a' * 64
             ),
@@ -271,6 +272,39 @@ class DeploymentPreflightTests(unittest.TestCase):
         self.assertEqual('failed', report['overall_status'])
         self.assertIn('FERNET_KEY_INVALID', self._codes(report))
 
+    def test_cdk_requires_independent_versioned_keys(self):
+        for same_key in (True, False):
+            values = self._valid_values()
+            encryption = base64.urlsafe_b64encode(b'e' * 32).decode('ascii')
+            lookup = encryption if same_key else base64.urlsafe_b64encode(b'l' * 32).decode('ascii')
+            values.update(CDK_ENABLED='1', CDK_ACTIVE_KEY_ID='v1', CDK_ENCRYPTION_KEYS="'" + json.dumps({'v1': encryption}) + "'",
+                          CDK_LOOKUP_KEYS="'" + json.dumps({'v1': lookup}) + "'")
+            self._write_env(values)
+            report = self._evaluate()
+            self.assertEqual('CDK_CONFIGURATION_INVALID' in self._codes(report), same_key)
+            self.assertNotIn(encryption, json.dumps(report))
+            self.assertNotIn(lookup, json.dumps(report))
+
+    def test_invalid_gmail_http_timeout_fails_closed(self):
+        for value in ('0', '-1', 'nan', 'inf', '1e309', 'not-a-number'):
+            with self.subTest(value=value):
+                values = self._valid_values()
+                values['GMAIL_HTTP_TIMEOUT_SECONDS'] = value
+                self._write_env(values)
+                report = self._evaluate()
+                self.assertEqual('failed', report['overall_status'])
+                self.assertIn('GMAIL_HTTP_TIMEOUT_INVALID', self._codes(report))
+
+    def test_gmail_http_timeout_accepts_any_finite_positive_runtime_value(self):
+        for value in ('0.5', '600.1', '601', '" 30 "', '1e-308', '1e308'):
+            with self.subTest(value=value):
+                values = self._valid_values()
+                values['GMAIL_HTTP_TIMEOUT_SECONDS'] = value
+                self._write_env(values)
+                report = self._evaluate()
+                self.assertEqual('pending', report['overall_status'])
+                self.assertNotIn('GMAIL_HTTP_TIMEOUT_INVALID', self._codes(report))
+
     def test_inline_comment_cannot_change_compose_secret(self):
         values = self._valid_values()
         values['ADMIN_PASSWORD'] = 'a' * 16 + ' #StrongSynthetic_123!'
@@ -452,6 +486,13 @@ class DeploymentPreflightTests(unittest.TestCase):
         self.credentials.write_text(json.dumps(document), encoding='utf-8')
         self.assertIn('OAUTH_FILE_INVALID', self._codes(self._evaluate()))
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX hard-link permissions are verified in Linux CI')
+    def test_oauth_file_rejects_hard_links(self):
+        self._write_env()
+        alias = self.root / 'credentials-alias.json'
+        alias.hardlink_to(self.credentials)
+        self.assertIn('OAUTH_FILE_INVALID', self._codes(self._evaluate()))
+
     def test_pubsub_topic_and_strong_token_must_be_configured_together(self):
         invalid_pairs = (
             ('projects/synthetic-project/topics/gmail-events', ''),
@@ -490,6 +531,15 @@ class DeploymentPreflightTests(unittest.TestCase):
         self.assertIn('RUNTIME_PERMISSION_INVALID', self._codes(self._evaluate()))
 
         insecure.unlink()
+        hardlink_source = self.root / 'hardlink-source.db'
+        hardlink_source.write_bytes(b'synthetic')
+        hardlink_source.chmod(0o600)
+        hardlink = instance / 'hardlink.db'
+        hardlink.hardlink_to(hardlink_source)
+        self.assertIn('RUNTIME_PERMISSION_INVALID', self._codes(self._evaluate()))
+
+        hardlink.unlink()
+        hardlink_source.unlink()
         link = instance / 'linked.db'
         link.symlink_to(self.credentials)
         self.assertIn('RUNTIME_PERMISSION_INVALID', self._codes(self._evaluate()))

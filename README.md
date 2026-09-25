@@ -122,6 +122,7 @@ Google_Manager/
 ├── deploy/                           # 生产服务器部署套件
 │   ├── gunicorn.conf.py              # Gunicorn 生产多线程 WSGI 配置
 │   ├── setup-server.sh               # Linux VPS 一键部署 Shell 脚本
+│   ├── prepare-compose-host.sh       # Compose 宿主目录与凭据权限准备脚本
 │   ├── systemd/
 │   │   └── google-manager.service    # Systemd 系统服务单元
 │   └── nginx/
@@ -169,11 +170,9 @@ nano .env
 # 3. 放入 Google Cloud 下载的 credentials.json
 cp /path/to/your/credentials.json ./credentials.json
 
-# 4. 首次空数据目录启动容器
-sudo install -d -m 700 -o 10001 -g 10001 instance googlemail/runtime googlemail/output
-sudo chown 10001:10001 credentials.json
-sudo chmod 600 credentials.json
-python3 deploy/preflight.py --env-file .env --project-root .
+# 4. 按容器 UID 准备 bind mount 目录和 OAuth 凭据权限
+sudo bash deploy/prepare-compose-host.sh
+sudo python3 deploy/preflight.py --env-file .env --project-root .
 python3 deploy/compose_release.py config --env-file .env --project-root .
 python3 deploy/compose_release.py pull --env-file .env --project-root .
 # 由负责人从独立的 GO 审批记录提供；禁止自取包内 hash 冒充批准
@@ -186,9 +185,12 @@ python3 deploy/compose_release.py up --env-file .env --project-root . --approved
 容器启动并按部署指南完成健康与安全验收后，使用两个独立入口：
 
 - C 端充值门户：`https://你的域名/` 或 `https://你的域名/recharge`
-- Google 邮箱管理后台：`https://你的域名/admin`
+- Google 邮箱管理：`https://你的域名/Googlemail`（Googlemail）
+- 充值管理后台：`https://你的域名/admin`（Chat GPT充值中心）
 
-充值门户面向终端用户开放，不要求管理员登录；账号库、Gmail 收件箱、批量授权和安全中心仅在 `/admin` 管理后台提供。
+Chat GPT充值中心面向终端用户开放，不要求管理员登录；账号库、Gmail 收件箱、批量授权和安全中心在 `/Googlemail` 提供。`/admin` 提供充值订单统计、搜索、详情、同步、撤回、关闭和人工对账，复用现有管理员会话与充值服务；两个后台共用管理员密码。
+
+当前服务器测试阶段无需域名和证书，邮箱管理访问 `http://123.206.210.86/Googlemail`，充值后台访问 `http://123.206.210.86/admin`。管理员凭据、HTTP 测试配置、验证与关闭入口步骤见 [测试部署说明](docs/production-manual-configuration.md#0-当前测试阶段直接使用-ip-和-http)；充值保持禁用，充值后台可查询历史订单。接口与操作说明见 [充值后台说明](docs/recharge-admin-guide.md)。
 
 ### 方案 B：Linux VPS (Ubuntu/Debian) 原生一键部署
 
@@ -270,8 +272,9 @@ node --test tests/frontend-ui.test.mjs tests/recharge-ui.test.mjs tests/recharge
 
 ## 生产部署与验收要点
 
+- 当前阻断状态与逐项操作见 [B01–B07 整改计划](docs/release-blockers-remediation-plan-2026-09-24.md) 和 [人工配置手册](docs/production-manual-configuration.md)。
 - 部署架构、配置约束、发布顺序和排障方法见 [部署技术说明](docs/deployment-technical-guide.md)。
-- C 端 `/`、`/recharge` 与管理端 `/admin` 分流；默认禁用真实充值，完成上游验收后才启用 `RECHARGE_MODE=live`。
+- 用户端 `/`、`/recharge`、邮箱管理 `/Googlemail` 与充值管理 `/admin` 分流；默认禁用真实充值，完成上游验收后才启用 `RECHARGE_MODE=live`。
 - 撤回/关闭必须同时匹配 `task_no`、完整卡密、目标邮箱和原创建会话的所有权摘要；历史任务没有所有权记录时匿名操作失败关闭，只能由管理员核对处理。
 - 同时运行 Web 与 `python -m app.worker`：任务、取消请求、收信开关持久化，执行中断的账号自动化不自动重放。
 - Compose 的 initialize 服务先创建包括 `recharge_task_access`、`recharge_billing_mutations` 在内的新增表并补齐 Gmail 执行租约字段，再启动 Web/worker；原生安装通过 ExecStartPre 执行 `python -m app.manage init-db`。

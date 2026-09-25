@@ -370,6 +370,7 @@ class RechargeReconciliationTestCase(unittest.TestCase):
         first = self.create_unknown_task('TK-LIVE-AUTO-RACE-ONE')
         second = self.create_unknown_task('TK-LIVE-AUTO-RACE-TWO')
         update_barrier = Barrier(2)
+        snapshot_threads = local()
         submissions = (
             (first.task_no, {
                 'task_no': 'UPSTREAM-AUTO-RACE',
@@ -386,16 +387,18 @@ class RechargeReconciliationTestCase(unittest.TestCase):
         )
         db.session.remove()
 
-        def synchronize_operation_binding(
+        def synchronize_task_snapshot(
             connection, cursor, statement, parameters, context, executemany,
         ):
             if (
-                statement.lstrip().upper().startswith('UPDATE RECHARGE_OPERATIONS')
-                and 'upstream_task_no' in statement
+                statement.lstrip().upper().startswith('UPDATE RECHARGE_TASKS')
+                and 'SET updated_at=recharge_tasks.updated_at' in statement
+                and not getattr(snapshot_threads, 'synchronized', False)
             ):
+                snapshot_threads.synchronized = True
                 update_barrier.wait(timeout=5)
 
-        event.listen(db.engine, 'before_cursor_execute', synchronize_operation_binding)
+        event.listen(db.engine, 'before_cursor_execute', synchronize_task_snapshot)
 
         def reconcile(item):
             task_no, remote = item
@@ -413,7 +416,7 @@ class RechargeReconciliationTestCase(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as workers:
                 results = list(workers.map(reconcile, submissions))
         finally:
-            event.remove(db.engine, 'before_cursor_execute', synchronize_operation_binding)
+            event.remove(db.engine, 'before_cursor_execute', synchronize_task_snapshot)
 
         self.assertEqual(sorted(results), ['controlled_error', 'ok'])
         db.session.expire_all()
@@ -424,6 +427,7 @@ class RechargeReconciliationTestCase(unittest.TestCase):
 
     def test_concurrent_live_creation_conflict_marks_loser_unknown(self):
         update_barrier = Barrier(2)
+        snapshot_threads = local()
         upstream_task_no = 'UPSTREAM-CREATE-RACE'
         payloads = tuple({
             'redeem_code': f'PLUS-CREATE-RACE-{suffix}',
@@ -439,13 +443,15 @@ class RechargeReconciliationTestCase(unittest.TestCase):
             'notify_email': f'{suffix.lower()}@example.test',
         } for suffix in ('ONE', 'TWO'))
 
-        def synchronize_operation_binding(
+        def synchronize_task_snapshot(
             connection, cursor, statement, parameters, context, executemany,
         ):
             if (
-                statement.lstrip().upper().startswith('UPDATE RECHARGE_OPERATIONS')
-                and 'upstream_task_no' in statement
+                statement.lstrip().upper().startswith('UPDATE RECHARGE_TASKS')
+                and 'SET updated_at=recharge_tasks.updated_at' in statement
+                and not getattr(snapshot_threads, 'synchronized', False)
             ):
+                snapshot_threads.synchronized = True
                 update_barrier.wait(timeout=5)
 
         def upstream_post(endpoint, payload, timeout=8):
@@ -472,7 +478,7 @@ class RechargeReconciliationTestCase(unittest.TestCase):
                     db.session.remove()
 
         db.session.remove()
-        event.listen(db.engine, 'before_cursor_execute', synchronize_operation_binding)
+        event.listen(db.engine, 'before_cursor_execute', synchronize_task_snapshot)
         try:
             with patch.object(
                 RechargeService,
@@ -482,7 +488,7 @@ class RechargeReconciliationTestCase(unittest.TestCase):
                 with ThreadPoolExecutor(max_workers=2) as workers:
                     results = list(workers.map(create, payloads))
         finally:
-            event.remove(db.engine, 'before_cursor_execute', synchronize_operation_binding)
+            event.remove(db.engine, 'before_cursor_execute', synchronize_task_snapshot)
 
         self.assertEqual(sorted(results), ['controlled_error', 'ok'])
         db.session.expire_all()

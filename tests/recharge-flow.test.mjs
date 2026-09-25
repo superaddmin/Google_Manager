@@ -212,7 +212,7 @@ test('recharge completes through browser, Flask, isolated upstream, and SQLite',
     }
   });
 
-  await page.goto(`${fixture.baseUrl}/recharge`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${fixture.baseUrl}/recharge?service=legacy`, { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: '自助充值与订单服务' }).waitFor();
   await assertLayoutFitsViewport(
     page,
@@ -277,6 +277,21 @@ test('recharge completes through browser, Flask, isolated upstream, and SQLite',
   assert.equal(state.upstream.create_count, 1, 'the browser flow must create one upstream task');
   assert.ok(state.upstream.validation_count >= 2, 'challenge creation must revalidate the CDK upstream');
   assert.ok(state.upstream.status_read_count >= 3, 'polling and refresh lookup must reach the upstream');
+  await page.goto(`${fixture.baseUrl}/admin?tab=orders`, { waitUntil: 'domcontentloaded' });
+  await page.getByPlaceholder('请输入密码').fill('admin123');
+  await page.getByRole('button', { name: '进入系统', exact: true }).click();
+  await page.getByRole('heading', { name: '充值订单', exact: true }).waitFor();
+  await page.getByText(taskNumber, { exact: true }).waitFor();
+  await page.getByRole('button', { name: '查看详情' }).click();
+  await page.getByText('SYNTHETIC-REMOTE-1', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '同步上游状态' }).click();
+  await page.getByRole('alert').filter({ hasText: '订单状态已同步' }).waitFor();
+  const adminState = await fixtureState();
+  assert.equal(adminState.upstream.create_count, 1, 'admin reads must not create an extra order');
+  assert.equal(adminState.upstream.status_read_count, state.upstream.status_read_count + 1);
+  assert.deepEqual(adminState.tasks, state.tasks);
+  await page.getByRole('button', { name: '退出登录', exact: true }).click();
+  await page.getByPlaceholder('请输入密码').waitFor();
   assert.equal(state.upstream.challenge_token_forwarded, false);
   assert.equal(state.upstream.idempotency_matches_client_task, true);
   assert.deepEqual(pageErrors, [], `page errors: ${pageErrors.join(' | ')}`);
@@ -294,7 +309,7 @@ test('recharge entry fits a 375px mobile viewport', async testContext => {
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(`${error.name}: ${error.message}`));
 
-  await page.goto(`${fixture.baseUrl}/recharge`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${fixture.baseUrl}/recharge?service=legacy`, { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: '自助充值与订单服务' }).waitFor();
   await assertLayoutFitsViewport(
     page,

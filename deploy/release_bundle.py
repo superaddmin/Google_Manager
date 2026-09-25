@@ -50,6 +50,11 @@ PLACEHOLDER_MARKERS = (
 
 PUBLIC_FILES = (
     "docker-compose.yml",
+    "deploy/prepare-compose-host.sh",
+    "deploy/chromium-seccomp.json",
+    "deploy/online_smoke.py",
+    "deploy/systemd/google-manager-compose-monitor@.service",
+    "deploy/systemd/google-manager-compose-monitor@.timer",
     "deploy/env.production.example",
     "deploy/preflight.py",
     "deploy/backup_database.py",
@@ -58,6 +63,8 @@ PUBLIC_FILES = (
     "deploy/nginx/google-manager.conf",
     "docs/deployment-technical-guide.md",
     "docs/deployment-preparation.md",
+    "docs/production-manual-configuration.md",
+    "docs/cdk-implementation-and-operations-2026-09-25.md",
     "docs/browser-security-baseline-2026-09-20.md",
     "docs/server-deployment-guide.md",
     "docs/release-signoff-template.md",
@@ -160,11 +167,14 @@ if (
 
 TEMPLATE_FIELDS = {
     "FLASK_ENV", "ADMIN_PASSWORD", "SECRET_KEY", "GMAIL_TOKEN_ENCRYPTION_KEY",
+    "GMAIL_HTTP_TIMEOUT_SECONDS",
     "GOOGLE_MANAGER_IMAGE", "PUBLIC_DOMAIN", "RECHARGE_MODE", "RECHARGE_UPSTREAM_URL",
     "RECHARGE_UPSTREAM_ALLOWED_HOSTS", "DATABASE_URL", "GMAIL_CLIENT_SECRET_FILE",
     "GMAIL_REDIRECT_URI", "GMAIL_PUBSUB_TOPIC", "GMAIL_PUBSUB_VERIFICATION_TOKEN",
     "PROXY", "HEADLESS", "TRUSTED_PROXY_CIDRS", "GUNICORN_BIND", "GUNICORN_WORKERS",
     "GUNICORN_THREADS", "GUNICORN_TIMEOUT", "GUNICORN_LOG_LEVEL",
+    "CDK_ENABLED", "CDK_ACTIVE_KEY_ID", "CDK_ENCRYPTION_KEYS", "CDK_LOOKUP_KEYS",
+    "CDK_SMTP_HOST", "CDK_SMTP_PORT", "CDK_SMTP_FROM", "CDK_SMTP_USERNAME", "CDK_SMTP_PASSWORD",
 }
 
 ERROR_MESSAGES = {
@@ -785,6 +795,16 @@ def _verify_template_is_non_secret(value):
         "ADMIN_PASSWORD": "CHANGE_ME",
         "SECRET_KEY": "CHANGE_ME",
         "GMAIL_TOKEN_ENCRYPTION_KEY": "CHANGE_ME",
+        "GMAIL_HTTP_TIMEOUT_SECONDS": "30",
+        "CDK_ENABLED": "0",
+        "CDK_ACTIVE_KEY_ID": "v1",
+        "CDK_ENCRYPTION_KEYS": "",
+        "CDK_LOOKUP_KEYS": "",
+        "CDK_SMTP_HOST": "",
+        "CDK_SMTP_PORT": "465",
+        "CDK_SMTP_FROM": "",
+        "CDK_SMTP_USERNAME": "",
+        "CDK_SMTP_PASSWORD": "",
         "GOOGLE_MANAGER_IMAGE": (
             "registry.example.invalid/google-manager@sha256:CHANGE_ME"
         ),

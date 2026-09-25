@@ -60,6 +60,7 @@ Dockerfile 使用多阶段构建；最终镜像复制 Python 运行时、前端�
 | `ADMIN_PASSWORD` | 至少 16 字符，UTF-8 不超过 4096 字节，无首尾空白，不使用示例密码；轮换后所有实例必须同步重启 |
 | `SECRET_KEY` | 至少 32 字节；所有 Web 实例一致，负责签名会话、挑战与任务所有权绑定 |
 | `GMAIL_TOKEN_ENCRYPTION_KEY` | 有效 Fernet key；所有 Web/worker 一致，用于 Gmail Token、队列 payload、账号/通知邮箱字段，及派生 CDK 字段 AES-SIV 和账单凭证 HMAC；不可直接换 key |
+| `GMAIL_HTTP_TIMEOUT_SECONDS` | Gmail OAuth 与 API 请求的单次网络超时，默认 30 秒；必须配置为正数，避免外部请求无限阻塞业务线程 |
 | `DATABASE_BACKUP_ENCRYPTION_KEY` | 独立备份密钥，仅提供给备份/恢复命令；也可用 `--key-file` 指定 0600 密钥文件，不复用业务 Fernet key |
 | `GMAIL_CLIENT_SECRET_FILE` | OAuth 客户端 JSON；Compose 固定挂载到 `/app/credentials.json`；原生使用项目绝对路径 |
 | `GMAIL_REDIRECT_URI` | 公网 HTTPS 回调，必须与 Google Cloud 登记地址一致 |
@@ -87,6 +88,8 @@ Dockerfile 使用多阶段构建；最终镜像复制 Python 运行时、前端�
 
 容器以 UID/GID `10001:10001` 运行，绑定目录必须对此用户可写，凭据文件可读。原生服务使用 `googlemanager` 用户，其 UID 不保证等于 10001。不得用放宽到 777 解决目录权限问题。`.dockerignore` 排除密钥、数据库和运行目录；单独保留数据库而丢失原 Fernet key 不能形成可恢复备份。
 
+Compose 首次部署或迁移已有运行目录时，先停止所有写入服务，再执行 `sudo bash deploy/prepare-compose-host.sh`。脚本只准备 `.env`、`credentials.json` 和三个 Compose bind mount 的目录/属主/权限，不创建密钥、不覆盖配置、不删除数据库；`.env` 设为 root:root 0600，后续 `preflight.py` 和受控 Compose 发布入口使用 root 会话。文件系统错误可能部分生效，需保持停服并排错重跑。若初始化失败，先检查 `stat -c '%n %a %u:%g' instance googlemail/runtime googlemail/output credentials.json`。本轮隔离 TLS、Compose 监控和人工配置步骤见 [人工配置手册](production-manual-configuration.md)。
+
 ### 3.3 同源访问与安全头
 
 公网仅通过 HTTPS 入口访问；Docker 8002 仅发布到宿主机 loopback，原生 Gunicorn 也默认绑定 loopback。Compose 网段默认 `172.30.8.0/24`，改变网段须核对可信代理地址，不能将整个公网设为可信。
@@ -99,7 +102,7 @@ production CSP 限制 script/connect 为同源，禁用 object/base；style 允�
 
 ### 4.1 数据库升级检查
 
-`init-db` 先注册模型并创建缺失表，再执行 `app/services/schema_migration.py` 中的版本化增量迁移，以 `schema_migrations` 记录版本并校验必需字段。它补齐 Gmail/billing 租约列，保留旧 `pending/unknown` 行与原操作号，并创建管理员会话及人工对账审计表。此实现不是任意数据库版本的自动升级器；仍须在目标库副本验证。
+`init-db` 先注册模型并创建缺失表，再执行 `app/services/schema_migration.py` 中的版本化增量迁移，以 `schema_migrations` 记录版本并校验必需字段。它补齐 Gmail/billing 租约列、统一账号与 Gmail 连接邮箱的大小写身份，并记录锁定前账号状态以支持正确解锁；保留旧 `pending/unknown` 行与原操作号，并创建管理员会话及人工对账审计表。邮箱规范化发现冲突时会整体回滚，禁止自动合并账号。此实现不是任意数据库版本的自动升级器；仍须在目标库副本验证。
 
 升级必须先停止 Web/worker 并完成加密备份，再迁移结构。账号密码、恢复邮箱、TOTP 及相应历史值新增静态加密；生产拒绝读取这些字段的旧明文，因此还须显式执行 `encrypt-sensitive-data` 盘点、`--apply` 加密，并再次盘点确认计数为 0 后才能启动。若账单摘要曾使用旧算法，须先用旧版本/旧密钥对账；无原凭证不能直接重算摘要。历史任务不会自动补出可信的创建会话所有权，匿名撤回/关闭失败时由管理员核验。
 
@@ -161,9 +164,9 @@ docker compose exec -T worker python -m app.worker --check
 docker compose logs --tail=100 initialize google-manager worker
 ```
 
-readiness 正常时 HTTP 200 且 `ready:true`。返回 503 时检查 `worker`、`gmailConfiguration`、`maintenance`、`automation`、`gmailActions`、`rechargeConfiguration` 和 `sensitiveData`；数据库异常可能只有 `ready:false`。生产敏感数据检查每次按批次读取并验证全部密文，拒绝旧明文、错误 key 或损坏值，不缓存健康结果；其总耗时随数据量增长，须纳入目标库容量及探活超时验收。心跳有效窗口为 30 秒。页面 200、进程 active 或心跳新鲜都不能单独证明第三方业务可用。
+readiness 正常时 HTTP 200 且 `ready:true`。返回 503 时检查 `worker`、`gmailConfiguration`、`maintenance`、`automation`、`gmailActions`、`rechargeConfiguration` 和 `sensitiveData`；数据库/结构异常可能只有 `ready:false`。探活对 Gmail 必需表列执行零行查询；敏感数据每表最多检查前 20 条，返回 `sensitiveDataSampleLimit:20`，不缓存健康结果。该有界样本能发现错误业务密钥等常见问题，但不能证明样本之外没有损坏数据；上线/恢复验收仍须执行 `python -m app.manage validate-db` 做全量结构/完整性/密文检查。该 CLI 不创建 Flask 应用、不执行迁移，SQLite 以只读连接打开既有文件，成功退出 0，失败退出 1。心跳有效窗口为 30 秒。页面 200、进程 active 或心跳新鲜都不能单独证明第三方业务可用。
 
-Nginx 模板对 `/health/` 默认仅允许 IPv4/IPv6 本机访问，公网请求应返回 403，避免匿名请求触发全库检查。远程监控通过受控本机采集器执行上述命令；确需远程直接探活时，只在该 location 的 `deny all` 之前加入固定监控源地址，并限制探测频率。不要放行整个公网或未经核验的转发头来源。直接暴露 Gunicorn 或绕过该模板会失去此保护；8002 端口必须保持仅本机/受控内网可达。外部页面存活监控可检查 `/recharge`，但不能将其等同 readiness。
+Nginx 模板对 `/health/` 默认仅允许 IPv4/IPv6 本机访问，公网请求应返回 403，避免匿名流量触发数据库探活。远程监控通过受控本机采集器执行上述命令；确需远程直接探活时，只在该 location 的 `deny all` 之前加入固定监控源地址，并限制探测频率。不要放行整个公网或未经核验的转发头来源。直接暴露 Gunicorn 或绕过该模板会失去此保护；8002 端口必须保持仅本机/受控内网可达。外部页面存活监控可检查 `/recharge`，但不能将其等同 readiness。
 
 上线前审查受控保存的 `nginx -T` 与实际网络拓扑：如果另一层本机代理将公网流量转发给此 Nginx，请求也会被识别为本机，必须在最外层阻断 `/health/`，或使用独立的环回健康检查监听器；禁止宽泛 `set_real_ip_from` 信任。目标环境应分别验证真实公网请求 403、本机探活 200/503、伪造 `X-Forwarded-For` 仍被拒绝；容量验收同时确认监控实例数及探测周期。
 

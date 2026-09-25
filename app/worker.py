@@ -145,6 +145,10 @@ def run_job(application, identifier, stopping):
 def maintenance(application):
     with application.app_context():
         failures = []
+        from app.services.cdk_redemption import recover_interrupted
+        recover_interrupted()
+        from app.services.cdk_maintenance import observe_outbox
+        observe_outbox()
         recharge_cursor = RuntimeQueue.state('maintenance').get('rechargeCursor', 0)
         GmailExecution.recover_expired_confirmations()
         retried = GmailRuleService.retry_due_actions()
@@ -165,10 +169,14 @@ def maintenance(application):
                     'consecutiveFailures': previous.get('consecutiveFailures', 0) + 1})
                 failures.append('gmail_sync:' + type(error).__name__)
         if application.config['RECHARGE_MODE'] == 'live':
+            from app.models.cdk import CdkRedemption
             task_query = RechargeTask.query.filter(RechargeTask.is_mock.is_(False), or_(
                 RechargeTask.status.in_(('pending', 'unknown', 'processing')),
                 RechargeMutation.query.filter(RechargeMutation.task_no == RechargeTask.task_no,
                                               RechargeMutation.state == 'unknown').exists(),
+                CdkRedemption.query.filter(CdkRedemption.task_no == RechargeTask.task_no, or_(
+                    CdkRedemption.state == 'unknown', CdkRedemption.mutation_state == 'unknown',
+                )).exists(),
             ))
             # Rotate independently of status timestamps so failed polls cannot
             # monopolize the bounded reconciliation batch.

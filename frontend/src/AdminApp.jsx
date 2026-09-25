@@ -25,6 +25,7 @@ import GmailInboxView from './components/GmailInboxView';
 import SecurityCenterView from './components/SecurityCenterView';
 
 const AdminApp = () => {
+    useEffect(() => { document.title = 'Googlemail · 谷歌邮箱管理'; }, []);
     const [view, setView] = useState('list');
     const [accounts, setAccounts] = useState([]);
     const [search, setSearch] = useState('');
@@ -368,7 +369,7 @@ const AdminApp = () => {
                             </div>
                             <span
                                 className={`hidden sm:inline-block text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r ${darkMode ? 'from-blue-400 via-indigo-300 to-cyan-300' : 'from-blue-600 via-indigo-600 to-cyan-600'}`}>
-                                GoogleManager
+                                Googlemail
                             </span>
                         </div>
 

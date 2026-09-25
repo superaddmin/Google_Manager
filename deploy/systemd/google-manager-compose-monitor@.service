@@ -1,0 +1,12 @@
+[Unit]
+Description=Google Manager Compose readiness and queue monitor (%i)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/%i
+ExecStart=/usr/bin/docker compose --project-name %i --env-file .env -f docker-compose.yml exec -T google-manager python -m app.monitor
+TimeoutStartSec=45
+StandardOutput=journal
+StandardError=journal

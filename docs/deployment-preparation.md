@@ -21,7 +21,7 @@
 预检只读取显式指定文件，不自动加载仓库 `.env`，不连接上游，不创建目录、不迁移数据库、不启动服务。仅打印字段名、固定错误分类和检查状态；不要在参数或问题反馈中贴出密钥值。
 
 ```bash
-python3 deploy/preflight.py --env-file /opt/google-manager/.env \
+sudo python3 deploy/preflight.py --env-file /opt/google-manager/.env \
   --project-root /opt/google-manager --pretty
 ```
 
@@ -29,7 +29,7 @@ python3 deploy/preflight.py --env-file /opt/google-manager/.env \
 
 预检必须在完整发布准备包目录执行，缺少 `manifest.json` 返回待确认；BLOCKED 包、镜像不匹配、目标 CPU 架构不匹配均不能放行。完整准备包仍为 `AWAITING_MANUAL_SIGNOFF`，预检返回 2，明确保留人工签字项；这不等同配置错误，也不等同允许启动。当前 Compose 预检仅支持默认持久化 SQLite：`DATABASE_URL` 留空或设为 `sqlite:////app/instance/accounts.db`，OAuth 宿主文件固定为包目录的 `credentials.json`。
 
-默认按 Compose 的 UID 10001 检查 OAuth 文件及 `instance/`、`googlemail/runtime/`、`googlemail/output/` 和其既有子项权限，拒绝符号链接。Windows 不能验证 Linux 权限，会返回待确认。静态检查不证明 DNS/TLS、容量、上游、镜像可拉取或告警送达；这些仍须签字单证据。
+预检按 Compose 的 UID `10001` 检查 OAuth 文件及 `instance/`、`googlemail/runtime/`、`googlemail/output/` 和其既有子项权限，拒绝符号链接、特殊文件、跨设备项和硬链接。停止写入服务后运行 `deploy/prepare-compose-host.sh`；脚本拒绝覆盖固定 UID/GID，先检查已有目录树，再将目录/普通文件收敛为 `0700/0600`、`10001:10001`，`.env` 为 `root:root/0600`。操作系统错误可能留下部分权限变更，应停服排错重跑。Windows 不能验证 Linux 权限，会返回待确认。静态检查不证明 DNS/TLS、容量、上游、镜像可拉取或告警送达；这些仍须签字单证据。
 
 生产 Compose 不包含构建入口，`GOOGLE_MANAGER_IMAGE` 必须指定已验收镜像。目标机使用受控入口，它清除继承的应用变量、`COMPOSE_*`、远程 Docker 覆盖项及隐式 `.env`，使用明确配置解析值，并在执行前核对三个服务的镜像及所有应用变量。配置快照和实际执行使用同一环境；含密钥的 Compose 输出只在内存解析，失败时只输出错误码。不要叠加 `docker-compose.build.yml`。
 
@@ -59,11 +59,14 @@ docker build --pull --tag google-manager:candidate .
 生产浏览器启动缺少路径、指定相对路径或同时设置 `CHROME_CHANNEL` 时失败关闭。所有入口显式启用 Chromium sandbox；目标宿主若不支持所需 namespace/seccomp，必须修正并重新验收，不能加入 `--no-sandbox`、特权容器或关闭安全检查绕过。最终镜像必须执行以下检查；它只使用本地页面和新建临时 profile，不读取账号文件或触发登录：
 
 ```bash
-docker run --rm --init --network none google-manager:candidate \
+docker run --rm --init --network none --shm-size=256m \
+  --security-opt seccomp=deploy/chromium-seccomp.json google-manager:candidate \
   node googlemail/src/startup-check.mjs
 ```
 
 检查应证明实际版本精确匹配、两类启动 API、JavaScript、截图和 locale 正常，并完成资源清理。本地主机测试不能代替该镜像/目标架构的检查；也不能代替获授权账号的真实 OAuth 验收。安装器的自算 SHA-256 用于锁定已取得的官方制品，不能写成 Google 额外提供的签名或独立安全认证。
+
+2026 年 9 月 24 日目标 Ubuntu 24.04.4 默认容器检查报 `No usable sandbox`。9 月 25 日加入仓库内 Playwright 官方有限 seccomp profile 后，两类启动检查在同一服务器通过；未修改宿主 AppArmor/sysctl，之前仅凭浏览器提示归因 AppArmor 不够准确。Compose Web/worker 和 CI 已统一引用该 profile。正式 registry digest 仍需复验；操作步骤见 [人工配置手册](production-manual-configuration.md)。
 
 ## 3. 隔离恢复演练
 

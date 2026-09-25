@@ -5,13 +5,14 @@ import unittest
 from unittest.mock import patch
 
 from deploy.recovery_drill import main, run_drill
+from app.services.schema_migration import MIGRATIONS
 
 
 class RecoveryDrillTests(unittest.TestCase):
     def test_shipped_cli_round_trip_and_failure_guards(self):
         result = run_drill()
         self.assertEqual(result['status'], 'passed')
-        self.assertEqual(result['migrations_applied'], 5)
+        self.assertEqual(result['migrations_applied'], len(MIGRATIONS))
         self.assertTrue(result['ciphertext_readable'])
         self.assertTrue(result['wrong_key_rejected'])
         self.assertTrue(result['overwrite_rejected'])

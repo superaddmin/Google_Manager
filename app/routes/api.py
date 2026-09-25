@@ -34,6 +34,7 @@ from app.services.gmail_rule_service import GmailRuleService, GmailRuleServiceEr
 from app.services.security_service import SecurityService
 from app.services.batch_oauth_service import batch_oauth_manager, BatchOAuthError
 from app.services.email_poller import gmail_sync_daemon
+from app.utils.email import canonicalize_email
 
 api_bp = Blueprint('api', __name__)
 
@@ -356,17 +357,18 @@ def gmail_pubsub_webhook():
         history_id = data.get('historyId')
         if not isinstance(email, str) or not email.strip() or not history_id:
             return error_response('Pub/Sub 消息缺少 Gmail 标识', 400)
+        email = canonicalize_email(email)
         if isinstance(history_id, bool) or not str(history_id).isdigit() or int(history_id) <= 0:
             return error_response('Pub/Sub 历史编号无效', 400)
         if current_app.config['BACKGROUND_TASK_MODE'] == 'queue':
-            if not GmailConnection.query.filter_by(email=email.strip()).first():
+            if not GmailConnection.query.filter_by(email=email).first():
                 return success_response({'processed': False, 'reason': 'unknown_connection'})
             import hashlib
             from app.services.runtime_queue import RuntimeQueue
-            request_key = hashlib.sha256(f'{email.strip()}:{history_id}'.encode()).hexdigest()
-            job = RuntimeQueue.enqueue('gmail_notification', {'email': email.strip(), 'historyId': str(history_id)}, request_key=request_key)
+            request_key = hashlib.sha256(f'{email}:{history_id}'.encode()).hexdigest()
+            job = RuntimeQueue.enqueue('gmail_notification', {'email': email, 'historyId': str(history_id)}, request_key=request_key)
             return success_response({'queued': True, 'jobId': job.id}), 202
-        result = GmailService.process_notification(email.strip(), str(history_id))
+        result = GmailService.process_notification(email, str(history_id))
         return success_response(
             {'processed': result is not None, 'result': result},
             'Pub/Sub 通知已处理',

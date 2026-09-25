@@ -78,6 +78,9 @@ def create_app(config_name=None):
     )
     production_secret = os.environ.get('SECRET_KEY', '')
     admin_password = os.environ.get('ADMIN_PASSWORD', '')
+    allow_test_admin_password = os.environ.get('ALLOW_TEST_ADMIN_PASSWORD') == '1'
+    if allow_test_admin_password and recharge_mode != 'disabled':
+        raise RuntimeError('ALLOW_TEST_ADMIN_PASSWORD requires RECHARGE_MODE=disabled')
     if (
         config_name == 'production'
         and len(production_secret.strip().encode('utf-8')) < 32
@@ -96,11 +99,11 @@ def create_app(config_name=None):
         raise RuntimeError('生产环境禁止使用默认示例 SECRET_KEY')
     if config_name == 'production' and hashlib.sha256(production_secret.strip().encode()).hexdigest() == 'd1c38779422605b6ee03d0e938324928cbff477e806c77ac156cfb9eabd6bc8f':
         raise RuntimeError('生产环境禁止使用默认示例 SECRET_KEY')
-    if config_name == 'production' and admin_password.strip() in {'admin', 'admin123', 'ChangeMeStrongPassword123!', 'YourComplexPassword_2026!'}:
+    if config_name == 'production' and not allow_test_admin_password and admin_password.strip() in {'admin', 'admin123', 'ChangeMeStrongPassword123!', 'YourComplexPassword_2026!'}:
         raise RuntimeError('生产环境禁止使用默认示例 ADMIN_PASSWORD')
     if config_name == 'production' and (
         admin_password != admin_password.strip()
-        or len(admin_password) < 16
+        or (len(admin_password) < 16 and not allow_test_admin_password)
         or len(admin_password.encode('utf-8')) > 4096
     ):
         raise RuntimeError('生产环境 ADMIN_PASSWORD 须为 16 字符以上、UTF-8 不超过 4096 字节且无首尾空白')
@@ -134,6 +137,8 @@ def create_app(config_name=None):
         app.config['ADMIN_PASSWORD'] = admin_password
     
     # 初始化扩展
+    from app.services.cdk_configuration import configure_cdk
+    configure_cdk(app)
     db.init_app(app)
     from app.services.request_security import TrustedProxyMiddleware
     app.wsgi_app = TrustedProxyMiddleware(app.wsgi_app, app.config['TRUSTED_PROXY_CIDRS'])
@@ -142,10 +147,12 @@ def create_app(config_name=None):
     from app.routes.main import main_bp
     from app.routes.api import api_bp
     from app.routes.recharge import recharge_bp
+    from app.routes.cdk import cdk_bp
     
     app.register_blueprint(main_bp)
     app.register_blueprint(api_bp, url_prefix='/api')
     app.register_blueprint(recharge_bp, url_prefix='/api/recharge')
+    app.register_blueprint(cdk_bp, url_prefix='/api/cdk')
 
     @app.after_request
     def protect_response(response):

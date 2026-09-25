@@ -73,6 +73,18 @@ def collect_status(application, *, web_ready, max_queue_age=300, max_unknown_age
                     RechargeBillingMutation.started_at <= now - max_unknown_age,
                 ).count(),
             }
+            from app.models.cdk import CdkOutbox, CdkRedemption
+            counts['cdk_redemption_overdue'] = CdkRedemption.query.filter(
+                CdkRedemption.state.in_(('prepared', 'dispatching', 'unknown')),
+                CdkRedemption.created_at <= now - max_unknown_age,
+            ).count()
+            counts['cdk_mutation_overdue'] = CdkRedemption.query.filter(
+                CdkRedemption.mutation_state.in_(('dispatching', 'unknown')),
+                CdkRedemption.updated_at <= now - max_unknown_age,
+            ).count()
+            counts['cdk_outbox_overdue'] = CdkOutbox.query.filter(
+                CdkOutbox.processed_at.is_(None), CdkOutbox.created_at <= now - max_queue_age,
+            ).count()
             result['counts'] = counts
             result['issues'].extend(name for name, count in counts.items() if count > 0)
         except Exception:

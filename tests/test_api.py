@@ -186,6 +186,12 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(duplicate.status_code, 400)
 
+        case_variant_duplicate = self.client.post(
+            "/api/accounts",
+            json={"email": "USER@EXAMPLE.TEST", "password": "Password-3"},
+        )
+        self.assertEqual(case_variant_duplicate.status_code, 400)
+
     def test_email_format_validation_applies_to_all_import_paths(self):
         for email in ("not-an-email", "user@", "@example.test", "user @example.test"):
             response = self.client.post(
@@ -227,6 +233,7 @@ class ApiTestCase(unittest.TestCase):
                 "accounts": [
                     {"email": "new@example.test", "password": "Password-1"},
                     {"email": "existing@example.test", "password": "Password-1"},
+                    {"email": "EXISTING@EXAMPLE.TEST", "password": "Password-1"},
                     {"email": "", "password": "Password-1"},
                     {"email": "missing-password@example.test", "password": ""},
                     "not-an-object",
@@ -236,7 +243,7 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         result = response.get_json()["data"]
         self.assertEqual(result["success_count"], 1)
-        self.assertEqual(result["failed_count"], 4)
+        self.assertEqual(result["failed_count"], 5)
         self.assertEqual(Account.query.count(), 2)
 
         invalid_container = self.client.post(

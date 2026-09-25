@@ -4,6 +4,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from googleapiclient.errors import HttpError
+
 from app import db
 from app.models.gmail_rule import GmailRule
 from app.models.gmail_task_log import GmailActionConfirmation, GmailTaskLog
@@ -155,6 +157,21 @@ class GmailRuleService:
     def _dump(value):
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
+    @staticmethod
+    def _modify_or_skip_deleted(connection, message_id, *, add, remove):
+        try:
+            return 'succeeded', GmailService.modify_message(connection, message_id, add=add, remove=remove)
+        except HttpError as error:
+            if error.resp.status != 404:
+                raise
+            try:
+                GmailService.get_message(connection, message_id, metadata_only=True)
+            except HttpError as lookup_error:
+                if lookup_error.resp.status == 404:
+                    return 'skipped', {'reason': 'message_not_found'}
+                raise
+            raise error
+
     @classmethod
     def _message_ids_for_rule(cls, connection, rule, message_ids, max_messages):
         if message_ids is not None:
@@ -246,15 +263,16 @@ class GmailRuleService:
                     continue
 
                 try:
-                    result = GmailService.modify_message(
+                    result_status, result = cls._modify_or_skip_deleted(
                         connection,
                         message_id,
                         add=actions[0],
                         remove=actions[1],
                     )
-                    log.status = 'succeeded'
+                    log.status = result_status
                     log.result_data = cls._dump(result)
-                    summary['succeeded'] += 1
+                    if result_status == 'succeeded':
+                        summary['succeeded'] += 1
                 except Exception as error:
                     log.status = 'failed'
                     log.error_message = str(error)[:500]
@@ -303,9 +321,10 @@ class GmailRuleService:
             log = db.session.get(GmailTaskLog, record.log_id)
             try:
                 actions = json.loads(log.request_data)
-                result = GmailService.modify_message(log.connection, log.message_id,
-                                                     add=actions.get('addLabelIds', []),
-                                                     remove=actions.get('removeLabelIds', []))
+                result_status, result = cls._modify_or_skip_deleted(
+                    log.connection, log.message_id,
+                    add=actions.get('addLabelIds', []), remove=actions.get('removeLabelIds', []),
+                )
             except Exception as error:
                 db.session.rollback()
                 changed = GmailTaskLog.query.filter_by(id=record.log_id, status='running').filter(
@@ -320,10 +339,11 @@ class GmailRuleService:
                 continue
             changed = GmailTaskLog.query.filter_by(id=record.log_id, status='running').filter(
                 GmailExecution.query.filter_by(key=record.key, lease_token=new_token).exists(),
-            ).update({'status': 'succeeded', 'result_data': cls._dump(result),
+            ).update({'status': result_status, 'result_data': cls._dump(result),
                       'completed_at': cls._utc_now()}, synchronize_session=False)
             if changed:
-                summary['succeeded'] += 1
+                if result_status == 'succeeded':
+                    summary['succeeded'] += 1
                 db.session.commit()
             else:
                 db.session.rollback()
@@ -354,7 +374,7 @@ class GmailRuleService:
         log = db.session.get(GmailTaskLog, log.id)
         try:
             actions = json.loads(log.request_data or '{}')
-            result = GmailService.modify_message(
+            result_status, result = cls._modify_or_skip_deleted(
                 log.connection,
                 log.message_id,
                 add=actions.get('addLabelIds', []),
@@ -362,7 +382,7 @@ class GmailRuleService:
             )
             changed = GmailTaskLog.query.filter_by(id=log.id, status='confirming').filter(
                 GmailExecution.query.filter_by(log_id=log.id, lease_token=token).exists(),
-            ).update({'status': 'succeeded', 'result_data': cls._dump(result),
+            ).update({'status': result_status, 'result_data': cls._dump(result),
                       'completed_at': cls._utc_now()}, synchronize_session=False)
             if changed != 1:
                 db.session.rollback()

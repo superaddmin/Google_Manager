@@ -5,7 +5,7 @@ import api from '../services/api';
 /**
  * 登录页面组件
  */
-const LoginPage = ({ onLoginSuccess, darkMode }) => {
+const LoginPage = ({ onLoginSuccess, darkMode, title = 'Googlemail', description = '请输入管理员密码以访问系统', compact = false }) => {
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
@@ -64,7 +64,7 @@ const LoginPage = ({ onLoginSuccess, darkMode }) => {
     };
 
     return (
-        <div className={`min-h-screen flex items-center justify-center ${darkMode ? 'bg-slate-900' : 'bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50'}`}>
+        <div className={`${compact ? 'py-8 px-4' : 'min-h-screen'} flex items-center justify-center ${darkMode ? 'bg-slate-900' : 'bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50'}`}>
             <div className={`w-full max-w-md p-8 rounded-3xl shadow-2xl ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
                 {/* Logo 和标题 */}
                 <div className="text-center mb-8">
@@ -72,10 +72,10 @@ const LoginPage = ({ onLoginSuccess, darkMode }) => {
                         <ShieldCheck className="text-white w-8 h-8" />
                     </div>
                     <h1 className={`text-2xl font-bold ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>
-                        GoogleManager
+                        {title}
                     </h1>
                     <p className={`mt-2 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                        请输入管理员密码以访问系统
+                        {description}
                     </p>
                 </div>
 

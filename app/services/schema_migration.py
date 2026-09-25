@@ -5,6 +5,7 @@ import importlib
 import json
 import pkgutil
 
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import Column, MetaData, String, Table, inspect, select, text
 
 from app.services.field_encryption import (
@@ -17,6 +18,7 @@ from app.services.field_encryption import (
     is_deterministically_encrypted,
     is_encrypted,
 )
+from app.utils.email import canonicalize_email
 
 
 MIGRATION_TABLE = 'schema_migrations'
@@ -33,12 +35,42 @@ MIGRATION_REQUIRED_COLUMNS = {
     },
 }
 
+GMAIL_REQUIRED_COLUMNS = {
+    'gmail_connections': {'id', 'email', 'token_data', 'scopes', 'created_at', 'updated_at'},
+    'gmail_rules': {
+        'id', 'connection_id', 'name', 'query', 'actions', 'enabled', 'priority',
+        'requires_confirmation', 'created_at', 'updated_at',
+    },
+    'gmail_watches': {
+        'id', 'connection_id', 'topic_name', 'history_id', 'expiration_at', 'active',
+        'created_at', 'updated_at',
+    },
+    'gmail_task_logs': {
+        'id', 'connection_id', 'rule_id', 'message_id', 'action', 'status',
+        'request_data', 'result_data', 'error_message', 'created_at', 'completed_at',
+    },
+    'gmail_action_confirmations': {
+        'id', 'task_log_id', 'status', 'reviewer', 'note', 'requested_at', 'reviewed_at',
+    },
+    'gmail_executions': MIGRATION_REQUIRED_COLUMNS['gmail_executions'],
+}
+
+GMAIL_REQUIRED_UNIQUE_KEYS = {
+    'gmail_connections': ({'id'}, {'email'}),
+    'gmail_rules': ({'id'},),
+    'gmail_watches': ({'id'}, {'connection_id'}),
+    'gmail_task_logs': ({'id'},),
+    'gmail_action_confirmations': ({'id'}, {'task_log_id'}),
+    'gmail_executions': ({'key'}, {'log_id'}),
+}
+
 FULL_REQUIRED_COLUMNS = {
     **MIGRATION_REQUIRED_COLUMNS,
+    **GMAIL_REQUIRED_COLUMNS,
     MIGRATION_TABLE: {'version', 'applied_at'},
     'accounts': {
         'id', 'email', 'password', 'recovery', 'secret', 'remark', 'status',
-        'sold_status', 'created_at', 'updated_at',
+        'pre_lock_status', 'sold_status', 'created_at', 'updated_at',
     },
     'account_history': {
         'id', 'account_id', 'field_name', 'old_value', 'new_value', 'changed_at',
@@ -59,6 +91,13 @@ FULL_REQUIRED_COLUMNS = {
         'notify_email', 'notice', 'created_at', 'updated_at',
     },
     'recharge_task_access': {'task_no', 'owner_digest'},
+    'recharge_mutation_reconciliations': {
+        'operation_id', 'task_no', 'action', 'resolution', 'basis',
+        'request_fingerprint', 'evidence_fingerprint', 'evidence_source',
+        'evidence_reference', 'evidence_sha256', 'evidence_observed_at',
+        'mutation_started_at', 'previous_state', 'final_state',
+        'upstream_task_no', 'previous_status', 'final_status', 'actor_id', 'created_at',
+    },
     'recharge_operations': {'task_no', 'active_key', 'upstream_task_no'},
     'recharge_mutations': {'task_no', 'action', 'operation_id', 'state', 'started_at'},
     'runtime_jobs': {
@@ -75,16 +114,17 @@ FULL_REQUIRED_COLUMNS = {
 }
 
 FULL_REQUIRED_UNIQUE_KEYS = {
+    **GMAIL_REQUIRED_UNIQUE_KEYS,
     MIGRATION_TABLE: ({'version'},),
     'accounts': ({'id'}, {'email'}),
     'admin_sessions': ({'token_hash'},),
-    'gmail_executions': ({'key'}, {'log_id'}),
     'recharge_billing_mutations': ({'credential_hash'},),
     'recharge_reconciliations': ({'id'}, {'task_no'}, {'evidence_fingerprint'}),
     'recharge_tasks': ({'id'}, {'task_no'}),
     'recharge_task_access': ({'task_no'},),
     'recharge_operations': ({'task_no'}, {'active_key'}, {'upstream_task_no'}),
     'recharge_mutations': ({'task_no'},),
+    'recharge_mutation_reconciliations': ({'operation_id'}, {'evidence_fingerprint'}),
     'runtime_jobs': ({'id'}, {'active_key'}, {'request_key'}),
     'runtime_states': ({'key'},),
     'request_limits': ({'key'},),
@@ -291,12 +331,61 @@ def _expand_recharge_sensitive_columns(connection):
         raise RuntimeError(f'不支持为 {dialect} 数据库扩展充值敏感字段列类型')
 
 
+def _migrate_email_canonicalization(connection):
+    for table_name in ('accounts', 'gmail_connections'):
+        if table_name not in set(inspect(connection).get_table_names()):
+            continue
+        if 'email' not in _columns(connection, table_name):
+            continue
+        table_sql = _quoted(connection, table_name)
+        rows = connection.execute(text(
+            f'SELECT id, email FROM {table_sql} ORDER BY id'
+        )).mappings().all()
+        seen = {}
+        updates = []
+        for row in rows:
+            try:
+                canonical = canonicalize_email(row['email'])
+            except ValueError as error:
+                raise RuntimeError(f'{table_name}.email 存在无效邮箱值，无法迁移') from error
+            if not canonical:
+                raise RuntimeError(f'{table_name}.email 存在空值，无法迁移')
+            previous_id = seen.get(canonical)
+            if previous_id is not None and previous_id != row['id']:
+                raise RuntimeError(f'{table_name}.email 规范化后存在重复值，必须先人工核对')
+            seen[canonical] = row['id']
+            if row['email'] != canonical:
+                updates.append((row['id'], canonical))
+        for row_id, canonical in updates:
+            connection.execute(text(
+                f'UPDATE {table_sql} SET email = :email WHERE id = :id'
+            ), {'email': canonical, 'id': row_id})
+
+
+def _migrate_account_pre_lock_status(connection):
+    if 'accounts' not in set(inspect(connection).get_table_names()):
+        return
+    _add_missing_columns(connection, 'accounts', (
+        ('pre_lock_status', 'VARCHAR(20)'),
+    ))
+
+
+def _migrate_cdk_catalog(connection):
+    from app import db
+    import app.models.cdk
+    tables = [table for name, table in db.metadata.tables.items() if name.startswith('cdk_')]
+    db.metadata.create_all(bind=connection, tables=tables)
+
+
 MIGRATIONS = (
     ('20260920_01_gmail_execution_lease_token', _migrate_gmail_execution_lease_token),
     ('20260920_02_recharge_billing_mutation_lease', _migrate_recharge_billing_mutation_lease),
     ('20260920_03_account_sensitive_columns', _expand_account_sensitive_columns),
     ('20260920_04_recharge_cross_process_uniques', _migrate_recharge_cross_process_uniques),
     ('20260920_05_recharge_sensitive_columns', _expand_recharge_sensitive_columns),
+    ('20260924_06_email_canonicalization', _migrate_email_canonicalization),
+    ('20260924_07_account_pre_lock_status', _migrate_account_pre_lock_status),
+    ('20260925_08_cdk_catalog', _migrate_cdk_catalog),
 )
 
 
@@ -405,9 +494,32 @@ def _unique_keys(connection, table_name):
 
 def validate_schema(bind, scope='full'):
     """Validate either migration targets or the complete production schema."""
-    if scope not in {'migration', 'full'}:
+    if scope not in {'migration', 'gmail', 'full'}:
         raise ValueError('未知数据库结构校验范围')
-    required = MIGRATION_REQUIRED_COLUMNS if scope == 'migration' else FULL_REQUIRED_COLUMNS
+    required = {
+        'migration': MIGRATION_REQUIRED_COLUMNS,
+        'gmail': GMAIL_REQUIRED_COLUMNS,
+        'full': FULL_REQUIRED_COLUMNS,
+    }[scope]
+    unique_keys = {
+        'migration': {},
+        'gmail': GMAIL_REQUIRED_UNIQUE_KEYS,
+        'full': FULL_REQUIRED_UNIQUE_KEYS,
+    }[scope]
+    if scope == 'full':
+        from app import db
+        import app.models.cdk
+        required = dict(required)
+        unique_keys = dict(unique_keys)
+        from sqlalchemy import UniqueConstraint
+        for name, table in db.metadata.tables.items():
+            if name.startswith('cdk_'):
+                required[name] = {column.name for column in table.columns}
+                unique_keys[name] = tuple(
+                    {column.name for column in constraint.columns}
+                    for constraint in table.constraints
+                    if isinstance(constraint, UniqueConstraint) or constraint is table.primary_key
+                )
     close_connection = not hasattr(bind, 'exec_driver_sql')
     connection = bind.connect() if close_connection else bind
     try:
@@ -420,16 +532,16 @@ def validate_schema(bind, scope='full'):
             missing = sorted(required_columns - _columns(connection, table_name))
             if missing:
                 errors.append(f'{table_name}: 缺少列 {", ".join(missing)}')
+        for table_name, expected_keys in unique_keys.items():
+            if table_name not in tables:
+                continue
+            actual_keys = _unique_keys(connection, table_name)
+            for expected_key in expected_keys:
+                if frozenset(expected_key) not in actual_keys:
+                    errors.append(
+                        f'{table_name}: 缺少唯一键 ({", ".join(sorted(expected_key))})'
+                    )
         if scope == 'full':
-            for table_name, expected_keys in FULL_REQUIRED_UNIQUE_KEYS.items():
-                if table_name not in tables:
-                    continue
-                actual_keys = _unique_keys(connection, table_name)
-                for expected_key in expected_keys:
-                    if frozenset(expected_key) not in actual_keys:
-                        errors.append(
-                            f'{table_name}: 缺少唯一键 ({", ".join(sorted(expected_key))})'
-                        )
             operation_columns = (
                 _columns(connection, 'recharge_operations')
                 if 'recharge_operations' in tables else set()
@@ -456,6 +568,16 @@ def initialize_database(engine):
         applied_now = _apply_schema_migrations(connection)
         validate_schema(connection, scope='full')
     return applied_now
+
+
+def probe_gmail_schema(engine):
+    with engine.connect() as connection:
+        for table_name, columns in GMAIL_REQUIRED_COLUMNS.items():
+            table_sql = _quoted(connection, table_name)
+            selected = ', '.join(f'{table_sql}.{_quoted(connection, column)}' for column in sorted(columns))
+            connection.execute(text(
+                f'SELECT {selected} FROM {table_sql} WHERE 1 = 0'
+            )).close()
 
 
 def encrypt_existing_sensitive_data(engine, encryption_key, apply=False, batch_size=500):
@@ -617,10 +739,12 @@ def has_unencrypted_sensitive_data(engine):
         return recharge_plaintext is not None
 
 
-def validate_sensitive_data(engine, encryption_key, batch_size=500):
-    """Validate every persisted sensitive value and fail closed on any mismatch."""
+def validate_sensitive_data(engine, encryption_key, batch_size=500, max_rows=None):
+    """Validate all sensitive values, or a bounded sample per table when requested."""
     if not encryption_key:
         raise RuntimeError('敏感数据校验需要长期加密密钥')
+    if max_rows is not None and (isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows < 1):
+        raise ValueError('敏感数据抽样上限必须是正整数')
     metadata = MetaData()
     available_tables = set(inspect(engine).get_table_names())
     required_tables = {'accounts', 'account_history', 'recharge_tasks'}
@@ -629,18 +753,44 @@ def validate_sensitive_data(engine, encryption_key, batch_size=500):
     accounts = Table('accounts', metadata, autoload_with=engine)
     history = Table('account_history', metadata, autoload_with=engine)
     recharge_tasks = Table('recharge_tasks', metadata, autoload_with=engine)
+    token_cipher = Fernet(encryption_key.encode('ascii') if isinstance(encryption_key, str) else encryption_key)
+
+    def validate_tokens(connection, table_name, field_name):
+        table = Table(table_name, metadata, autoload_with=connection)
+        last_id = None
+        checked = 0
+        while max_rows is None or checked < max_rows:
+            statement = select(table.c.id, table.c[field_name])
+            if last_id is not None:
+                statement = statement.where(table.c.id > last_id)
+            limit = batch_size if max_rows is None else min(batch_size, max_rows - checked)
+            rows = connection.execute(statement.order_by(table.c.id).limit(limit)).mappings().all()
+            if not rows:
+                return
+            checked += len(rows)
+            for row in rows:
+                last_id = row['id']
+                try:
+                    payload = json.loads(token_cipher.decrypt(row[field_name].encode('ascii')))
+                    if not isinstance(payload, dict):
+                        raise ValueError('invalid payload')
+                except (InvalidToken, ValueError, TypeError, AttributeError) as error:
+                    raise RuntimeError(f'{table_name}.{field_name} 无法使用当前业务密钥读取') from error
 
     def validate_random(connection, table, fields):
         last_id = None
-        while True:
+        checked = 0
+        while max_rows is None or checked < max_rows:
             statement = select(table.c.id, *[table.c[name] for name in fields])
             if last_id is not None:
                 statement = statement.where(table.c.id > last_id)
+            limit = batch_size if max_rows is None else min(batch_size, max_rows - checked)
             rows = connection.execute(
-                statement.order_by(table.c.id).limit(batch_size)
+                statement.order_by(table.c.id).limit(limit)
             ).mappings().all()
             if not rows:
                 return
+            checked += len(rows)
             for row in rows:
                 last_id = row['id']
                 for field_name in fields:
@@ -653,7 +803,8 @@ def validate_sensitive_data(engine, encryption_key, batch_size=500):
 
     def validate_history(connection):
         last_id = None
-        while True:
+        checked = 0
+        while max_rows is None or checked < max_rows:
             statement = select(
                 history.c.id,
                 history.c.field_name,
@@ -662,11 +813,13 @@ def validate_sensitive_data(engine, encryption_key, batch_size=500):
             )
             if last_id is not None:
                 statement = statement.where(history.c.id > last_id)
+            limit = batch_size if max_rows is None else min(batch_size, max_rows - checked)
             rows = connection.execute(
-                statement.order_by(history.c.id).limit(batch_size)
+                statement.order_by(history.c.id).limit(limit)
             ).mappings().all()
             if not rows:
                 return
+            checked += len(rows)
             for row in rows:
                 last_id = row['id']
                 if row['field_name'] not in ('password', 'recovery', 'secret'):
@@ -685,7 +838,8 @@ def validate_sensitive_data(engine, encryption_key, batch_size=500):
             ('redeem_code', 'recharge-task:redeem-code'),
             ('account_email', 'recharge-task:account-email'),
         )
-        while True:
+        checked = 0
+        while max_rows is None or checked < max_rows:
             statement = select(
                 recharge_tasks.c.id,
                 recharge_tasks.c.redeem_code,
@@ -694,11 +848,13 @@ def validate_sensitive_data(engine, encryption_key, batch_size=500):
             )
             if last_id is not None:
                 statement = statement.where(recharge_tasks.c.id > last_id)
+            limit = batch_size if max_rows is None else min(batch_size, max_rows - checked)
             rows = connection.execute(
-                statement.order_by(recharge_tasks.c.id).limit(batch_size)
+                statement.order_by(recharge_tasks.c.id).limit(limit)
             ).mappings().all()
             if not rows:
                 return
+            checked += len(rows)
             for row in rows:
                 last_id = row['id']
                 for field_name, domain in deterministic_fields:
@@ -719,3 +875,8 @@ def validate_sensitive_data(engine, encryption_key, batch_size=500):
         validate_random(connection, accounts, ('password', 'recovery', 'secret'))
         validate_history(connection)
         validate_recharge(connection)
+        for table_name, field_name in (('gmail_connections', 'token_data'), ('runtime_jobs', 'payload')):
+            if table_name in available_tables:
+                validate_tokens(connection, table_name, field_name)
+    from app.services.cdk_maintenance import validate_cdk_ciphertexts
+    validate_cdk_ciphertexts(engine, max_rows=max_rows)

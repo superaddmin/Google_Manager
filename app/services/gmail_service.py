@@ -1,17 +1,20 @@
 """Gmail API OAuth and inbox operations."""
 import base64
 import json
+import math
 import os
 import time
 from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet, InvalidToken
 from flask import current_app, url_for
+from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from app import db
 from app.models.gmail_connection import GmailConnection
 from app.models.gmail_watch import GmailWatch
 from app.models.one_time_token import OneTimeToken
+from app.utils.email import canonicalize_email
 
 GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
@@ -47,7 +50,30 @@ class GmailServiceError(RuntimeError):
     """Raised when Gmail configuration or an API call fails."""
 
 
+class _GmailRefreshRequest(GoogleAuthRequest):
+    """为 OAuth token 刷新请求注入应用级超时。"""
+
+    def __init__(self, timeout):
+        super().__init__()
+        self.timeout = timeout
+
+    def __call__(self, *args, **kwargs):
+        if kwargs.get('timeout') is None:
+            kwargs['timeout'] = self.timeout
+        return super().__call__(*args, **kwargs)
+
+
 class GmailService:
+    @staticmethod
+    def _http_timeout():
+        try:
+            timeout = float(current_app.config.get('GMAIL_HTTP_TIMEOUT_SECONDS', 30))
+        except (TypeError, ValueError) as error:
+            raise GmailServiceError('GMAIL_HTTP_TIMEOUT_SECONDS 必须是正数') from error
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise GmailServiceError('GMAIL_HTTP_TIMEOUT_SECONDS 必须是正数')
+        return timeout
+
     @staticmethod
     def _client_config():
         path = current_app.config.get('GMAIL_CLIENT_SECRET_FILE')
@@ -100,9 +126,11 @@ class GmailService:
     @classmethod
     def complete_authorization(cls, code, state):
         flow = cls._flow(state=state)
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=code, timeout=cls._http_timeout())
         credentials = flow.credentials
-        email = cls._service_for_credentials(credentials).users().getProfile(userId='me').execute()['emailAddress']
+        email = canonicalize_email(
+            cls._service_for_credentials(credentials).users().getProfile(userId='me').execute()['emailAddress']
+        )
         connection = GmailConnection.query.filter_by(email=email).first()
         if not connection:
             connection = GmailConnection(email=email, token_data='', scopes=' '.join(GMAIL_SCOPES))
@@ -115,18 +143,24 @@ class GmailService:
     @staticmethod
     def _service_for_credentials(credentials):
         from googleapiclient.discovery import build
-        return build('gmail', 'v1', credentials=credentials, cache_discovery=False)
+        import httplib2
+        from google_auth_httplib2 import AuthorizedHttp
+
+        http = AuthorizedHttp(
+            credentials,
+            http=httplib2.Http(timeout=GmailService._http_timeout()),
+        )
+        return build('gmail', 'v1', http=http, cache_discovery=False)
 
     @classmethod
     def _service(cls, connection):
         from google.oauth2.credentials import Credentials
         from app.models.account import Account
-        if Account.query.filter_by(email=connection.email, status='locked').first():
+        if Account.query.filter_by(email=canonicalize_email(connection.email), status='locked').first():
             raise GmailServiceError('锁定账号禁止访问 Gmail')
         credentials = Credentials.from_authorized_user_info(cls._decrypt(connection.token_data), GMAIL_SCOPES)
         if credentials.expired and credentials.refresh_token:
-            from google.auth.transport.requests import Request
-            credentials.refresh(Request())
+            credentials.refresh(_GmailRefreshRequest(cls._http_timeout()))
             connection.token_data = cls._encrypt(json.loads(credentials.to_json()))
             db.session.commit()
         return cls._service_for_credentials(credentials)
@@ -192,7 +226,7 @@ class GmailService:
 
     @classmethod
     def process_notification(cls, email, history_id):
-        connection = GmailConnection.query.filter_by(email=email).first()
+        connection = GmailConnection.query.filter_by(email=canonicalize_email(email)).first()
         if not connection:
             return None
         watch = GmailWatch.query.filter_by(connection_id=connection.id, active=True).first()

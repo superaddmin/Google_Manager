@@ -45,10 +45,10 @@ class RechargeMutation(db.Model):
                 db.session.add(record)
                 db.session.flush()
             else:
-                # 只有已完成的上一次操作允许开启下一次；pending/unknown 必须先对账。
+                # 已完成或人工确认未执行的操作允许开启下一次；pending/unknown 必须先对账。
                 claimed = cls.query.filter(
                     cls.task_no == task.task_no,
-                    cls.state == 'done',
+                    cls.state.in_(('done', 'rejected')),
                 ).update({
                     'action': action,
                     'operation_id': operation_id,

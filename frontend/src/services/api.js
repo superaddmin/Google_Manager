@@ -149,7 +149,7 @@ const parseJsonResponse = async (res, fallbackMessage) => {
     }
 };
 
-const fetchWithTimeout = async (
+export const fetchWithTimeout = async (
     url,
     options = {},
     fallbackMessage,
@@ -211,7 +211,7 @@ const withWriteRequestHeaders = (options) => {
     };
 };
 
-const requestJson = async (url, options, fallbackMessage) => {
+export const requestJson = async (url, options, fallbackMessage) => {
     const { timeoutMs, ...fetchOptions } = options || {};
     return await fetchWithTimeout(
         url,
@@ -639,6 +639,30 @@ const api = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ token_input: tokenInput, confirmed })
         }, '恢复自动续费失败');
+    },
+
+    async getRechargeAdminOverview(options = {}) {
+        return await requestJson(`${API_BASE}/recharge/admin/overview`, options, '加载充值概览失败');
+    },
+
+    async getRechargeAdminTasks(filters = {}, options = {}) {
+        const parameters = new URLSearchParams(filters);
+        return await requestJson(`${API_BASE}/recharge/admin/tasks?${parameters}`, options, '加载充值订单失败');
+    },
+
+    async getRechargeAdminTask(taskNo, options = {}) {
+        return await requestJson(`${API_BASE}/recharge/admin/tasks/${encodeURIComponent(taskNo)}`, options, '加载订单详情失败');
+    },
+
+    async updateRechargeAdminTask(taskNo, action, payload = {}) {
+        return await requestJson(`${API_BASE}/recharge/admin/tasks/${encodeURIComponent(taskNo)}/${action}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+        }, '订单操作失败');
+    },
+
+    async reconcileRechargeAdminTask(taskNo, payload, operationId) {
+        const path = operationId ? `mutations/${encodeURIComponent(operationId)}/reconcile` : 'reconcile';
+        return await this.updateRechargeAdminTask(taskNo, path, payload);
     },
 
     // 退出登录并清除服务端会话

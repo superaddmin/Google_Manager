@@ -23,6 +23,7 @@ from app.models.account_history import AccountHistory
 from app.models.gmail_connection import GmailConnection
 from app.services.gmail_service import GmailService, OAuthStateManager
 from app.services.googlemail_service import PASSTHROUGH_ENVIRONMENT_KEYS
+from app.utils.email import canonicalize_email
 
 
 TERMINAL_STATUSES = {'completed', 'failed', 'cancelled'}
@@ -400,7 +401,10 @@ class BatchOAuthManager:
 
                         if success and account_id:
                             acc = db.session.get(Account, account_id)
-                            conn = GmailConnection.query.filter_by(email=email).first()
+                            canonical_email = (
+                                canonicalize_email(email) if isinstance(email, str) else email
+                            )
+                            conn = GmailConnection.query.filter_by(email=canonical_email).first()
                             if acc and conn:
                                 history = AccountHistory(
                                     account_id=acc.id,

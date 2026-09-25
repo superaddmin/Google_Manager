@@ -19,6 +19,7 @@ from app.models.account import Account
 from app.models.account_history import AccountHistory
 from app.models.recharge_task import RechargeTask
 from app.services.schema_migration import (
+    MIGRATIONS,
     apply_schema_migrations,
     encrypt_existing_sensitive_data,
     has_unencrypted_sensitive_data,
@@ -293,7 +294,7 @@ class DatabaseBackupTestCase(unittest.TestCase):
                 )
             first = apply_schema_migrations(engine)
             second = apply_schema_migrations(engine)
-            self.assertEqual(len(first), 5)
+            self.assertEqual(len(first), len(MIGRATIONS))
             self.assertEqual(second, [])
             inspector = inspect(engine)
             self.assertIn('lease_token', {column['name'] for column in inspector.get_columns('gmail_executions')})
@@ -315,7 +316,7 @@ class DatabaseBackupTestCase(unittest.TestCase):
                 ))
                 self.assertEqual(connection.exec_driver_sql(
                     'SELECT COUNT(*) FROM schema_migrations'
-                ).scalar_one(), 5)
+                ).scalar_one(), len(MIGRATIONS))
             engine.dispose()
 
     def test_recharge_operation_migration_rejects_blank_upstream_without_mutation(self):
@@ -384,7 +385,7 @@ class DatabaseBackupTestCase(unittest.TestCase):
             try:
                 with application.app_context():
                     applied = initialize_database(engine)
-                self.assertEqual(len(applied), 5)
+                self.assertEqual(len(applied), len(MIGRATIONS))
                 with engine.connect() as connection:
                     row = connection.exec_driver_sql(
                         'SELECT task_no, active_key, upstream_task_no '
@@ -428,7 +429,7 @@ class DatabaseBackupTestCase(unittest.TestCase):
             try:
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     results = list(executor.map(migrate, engines))
-                self.assertEqual(sorted(len(result) for result in results), [0, 5])
+                self.assertEqual(sorted(len(result) for result in results), [0, len(MIGRATIONS)])
             finally:
                 for engine in engines:
                     engine.dispose()
@@ -451,7 +452,7 @@ class DatabaseBackupTestCase(unittest.TestCase):
             try:
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     results = list(executor.map(initialize, engines))
-                self.assertEqual(sorted(len(result) for result in results), [0, 5])
+                self.assertEqual(sorted(len(result) for result in results), [0, len(MIGRATIONS)])
                 validate_schema(engines[0], scope='full')
             finally:
                 for engine in engines:
@@ -543,7 +544,7 @@ class DatabaseBackupTestCase(unittest.TestCase):
                 self.assertTrue(secret.startswith('gmenc:v1:'))
                 self.assertEqual(restored.execute(
                     'SELECT COUNT(*) FROM schema_migrations'
-                ).fetchone()[0], 5)
+                ).fetchone()[0], len(MIGRATIONS))
 
     def test_sensitive_fields_encrypt_new_and_existing_plaintext(self):
         key = Fernet.generate_key().decode('ascii')

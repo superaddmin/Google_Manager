@@ -313,6 +313,7 @@ class GooglemailTaskManager:
             env.update({
                 'ACCOUNTS_FILE': str(record.input_file),
                 'OUTPUT_DIR': str(record.output_dir),
+                'USER_DATA_DIR': str(record.task_dir / 'browser-data'),
                 'HEADLESS': str(record.options['headless']).lower(),
                 'SLOW_MO': str(record.options['slowMo']),
                 'ACCOUNT_DELAY': str(record.options['accountDelay']),
@@ -388,7 +389,10 @@ class GooglemailTaskManager:
                 except Exception:
                     runtime_error_code = 'RESULT_SYNC_FAILED'
 
-            cleanup_succeeded = self._remove_file(record.input_file)
+            cleanup_succeeded = (
+                self._remove_file(record.input_file)
+                and self._remove_directory(record.task_dir / 'browser-data')
+            )
             if result_sync_succeeded:
                 cleanup_succeeded = (
                     self._remove_file(record.output_dir / 'result.txt')
@@ -510,6 +514,22 @@ class GooglemailTaskManager:
                 if attempt + 1 < attempts:
                     time.sleep(0.05)
         return False
+
+    @staticmethod
+    def _remove_directory(path, attempts=3):
+        for attempt in range(attempts):
+            try:
+                if not path.exists():
+                    return True
+                if path.is_symlink():
+                    path.unlink()
+                else:
+                    shutil.rmtree(path)
+                return not path.exists()
+            except OSError:
+                if attempt + 1 < attempts:
+                    time.sleep(0.05)
+        return not path.exists()
 
     def _refresh_counts(self, record):
         progress_file = record.output_dir / 'progress.json'

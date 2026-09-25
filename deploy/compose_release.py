@@ -43,22 +43,28 @@ COMMANDS = {
 REQUIRES_GO = {'up', 'init-db', 'inventory-encryption', 'apply-encryption'}
 APPLICATION_FIELDS = {
     'FLASK_ENV', 'ADMIN_PASSWORD', 'SECRET_KEY', 'GMAIL_TOKEN_ENCRYPTION_KEY',
+    'GMAIL_HTTP_TIMEOUT_SECONDS',
     'RECHARGE_MODE', 'RECHARGE_UPSTREAM_URL', 'RECHARGE_UPSTREAM_ALLOWED_HOSTS',
     'DATABASE_URL', 'GMAIL_CLIENT_SECRET_FILE', 'GMAIL_REDIRECT_URI',
     'GMAIL_PUBSUB_TOPIC', 'GMAIL_PUBSUB_VERIFICATION_TOKEN', 'PROXY', 'HEADLESS',
     'TRUSTED_PROXY_CIDRS', 'GUNICORN_BIND', 'GUNICORN_WORKERS', 'GUNICORN_THREADS',
     'GUNICORN_TIMEOUT', 'GUNICORN_LOG_LEVEL',
+    'CDK_ENABLED', 'CDK_ACTIVE_KEY_ID', 'CDK_ENCRYPTION_KEYS', 'CDK_LOOKUP_KEYS',
+    'CDK_SMTP_HOST', 'CDK_SMTP_PORT', 'CDK_SMTP_FROM', 'CDK_SMTP_USERNAME', 'CDK_SMTP_PASSWORD',
 }
 DEFAULTS = {
     'FLASK_ENV': 'production', 'RECHARGE_MODE': 'disabled',
     'RECHARGE_UPSTREAM_ALLOWED_HOSTS': 'aichong666.com',
     'GMAIL_CLIENT_SECRET_FILE': '/app/credentials.json', 'HEADLESS': 'true',
+    'GMAIL_HTTP_TIMEOUT_SECONDS': '30',
     'TRUSTED_PROXY_CIDRS': '172.30.8.1/32', 'GUNICORN_BIND': '0.0.0.0:8002',
     'GUNICORN_WORKERS': '2', 'GUNICORN_THREADS': '4', 'GUNICORN_TIMEOUT': '120',
     'GUNICORN_LOG_LEVEL': 'info',
+    'CDK_ENABLED': '0', 'CDK_ACTIVE_KEY_ID': 'v1', 'CDK_SMTP_PORT': '465',
 }
 TRUSTED_PATH = '/usr/sbin:/usr/bin:/sbin:/bin'
 REQUIRED_HASHED_FILES = {'manifest.json', 'docker-compose.yml',
+                         'deploy/chromium-seccomp.json',
                          'deploy/compose_release.py', 'deploy/preflight.py',
                          'deploy/env.production.example'}
 

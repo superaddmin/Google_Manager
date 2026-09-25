@@ -126,6 +126,18 @@ Playwright `1.63.0` 的 npm 官方 registry 元数据如下；升级时必须由
 
 生产整改目标：以 UID 10001 非 root 运行，删除禁用 sandbox 的参数，并在目标 Docker/内核/seccomp 组合上验证 `chromiumSandbox: true`。如果目标宿主暂时不能启用 Chromium sandbox，必须形成书面风险接受、严格 URL/出口限制、只读根文件系统、最小 capabilities、独立 worker、资源限制和补丁 SLA；不能仅以“容器已非 root”认定等价隔离。
 
+### 7.1 目标服务器实测记录（2026-09-24）
+
+在 `123.206.210.86` 的 Ubuntu 24.04.4、Docker Engine 29.1.3 环境中执行：
+
+```bash
+docker run --rm --init --network none \
+  google-manager:online-test \
+  node googlemail/src/startup-check.mjs
+```
+
+当时结果为失败，日志为 `No usable sandbox`；仅凭提示不能确认是宿主 AppArmor 导致。2026-09-25 同一服务器增加 `--security-opt seccomp=deploy/chromium-seccomp.json --shm-size=256m` 后检查通过；宿主 AppArmor/sysctl 未变更，没有增加 capabilities、特权或关闭 sandbox。该 profile 来自固定 Playwright 版本，来源、摘要和命令见 [人工配置手册](production-manual-configuration.md)。B02 的目标测试运行缺陷已修复；正式不可变镜像 digest 仍需重跑并保存证据。
+
 ## 8. 必须实测的发布门禁
 
 以下项目均需针对最终同一个不可变镜像 digest 执行。本文未执行这些集成测试，状态均为“待验证”；历史镜像、构建中间层或本地主机的结果不能替代最终候选证据。

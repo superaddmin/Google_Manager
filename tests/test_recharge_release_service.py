@@ -40,6 +40,38 @@ class RechargeReleaseServiceTestCase(unittest.TestCase):
     def test_live_mode_does_not_report_mock_processing_statistics(self):
         self.assertEqual(RechargeService.get_avg_processing_time(), [])
 
+    def test_mutation_rejects_conflicting_upstream_identity_without_releasing_task(self):
+        for action in ('recall', 'close'):
+            for conflict in ({'task_no': 'REMOTE-OTHER'}, {'account_email': 'other@example.test'}):
+                with self.subTest(action=action, conflict=conflict):
+                    identifier = f'TK-{action}-{next(iter(conflict))}'
+                    task = RechargeTask(
+                        task_no=identifier, redeem_code='PLUS-' + identifier, plan_type='PLUS',
+                        account_email='fixture@example.test', status='processing', is_mock=False,
+                    )
+                    db.session.add(task)
+                    db.session.flush()
+                    db.session.add(RechargeOperation(
+                        task_no=identifier, active_key=identifier, upstream_task_no='REMOTE-' + identifier,
+                    ))
+                    db.session.commit()
+                    remote = {
+                        'task_no': 'REMOTE-' + identifier, 'client_task_no': identifier,
+                        'redeem_code': task.redeem_code, 'account_email': task.account_email,
+                        'status': 'recalled' if action == 'recall' else 'closed', **conflict,
+                    }
+                    with patch.object(RechargeService, '_upstream_post', return_value={
+                        'ok': True, 'task': remote,
+                    }), self.assertRaises(RechargeUpstreamError):
+                        getattr(RechargeService, action + '_task')({
+                            'task_no': identifier, 'redeem_code': task.redeem_code,
+                            'email': task.account_email, 'confirmed': True,
+                        })
+                    db.session.expire_all()
+                    self.assertEqual(task.status, 'processing')
+                    self.assertEqual(db.session.get(RechargeMutation, identifier).state, 'unknown')
+                    self.assertEqual(db.session.get(RechargeOperation, identifier).active_key, identifier)
+
     def test_bound_task_rejects_status_response_without_upstream_task_number(self):
         task = RechargeTask(
             task_no='TK-LIVE-BOUND-STATUS',

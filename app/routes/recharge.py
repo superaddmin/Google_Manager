@@ -128,6 +128,25 @@ def enforce_request_safety():
         if not isinstance(request.get_json(silent=True), dict):
             return error_response('请求格式错误，必须为 JSON 对象', 400)
 
+    if request.path.startswith('/api/recharge/admin/'):
+        from app.services.auth_service import is_admin_authenticated
+        if not is_admin_authenticated():
+            return error_response('请先登录管理员账号', 401)
+
+    from app.models.cdk import CdkRedemption
+    from app.services.cdk_service import guard_legacy_code
+    values = request.get_json(silent=True) or {}
+    if isinstance(values, dict):
+        for value in (values.get('redeem_code'), values.get('slug')):
+            guard_legacy_code(value)
+        for value in values.get('redeem_codes', []) if isinstance(values.get('redeem_codes'), list) else []:
+            guard_legacy_code(value)
+    task_no = (request.view_args or {}).get('task_no') or values.get('task_no')
+    if not task_no and isinstance(values.get('redeem_code'), str) and values['redeem_code'].startswith('TK-'):
+        task_no = values['redeem_code']
+    if task_no and isinstance(task_no, str) and CdkRedemption.query.filter_by(task_no=task_no).first():
+        return error_response('平台卡密订单请使用卡密工作台或本人核销记录入口', 403)
+
     if request.endpoint not in {'recharge.get_config', 'recharge.get_agreement', 'recharge.get_features'}:
         return limit_recharge_request()
 
@@ -255,6 +274,54 @@ def reconcile_unknown_task(task_no):
         actor_id,
     )
     return success_response(result, '人工对账已完成')
+
+
+@recharge_bp.route('/admin/overview', methods=['GET'])
+def admin_overview():
+    from app.services.recharge_admin_service import RechargeAdminService
+    return success_response(RechargeAdminService.overview())
+
+
+@recharge_bp.route('/admin/tasks', methods=['GET'])
+def admin_tasks():
+    from app.services.recharge_admin_service import RechargeAdminService
+    return success_response(RechargeAdminService.list_tasks(request.args))
+
+
+@recharge_bp.route('/admin/tasks/<task_no>', methods=['GET'])
+def admin_task_detail(task_no):
+    from app.services.recharge_admin_service import RechargeAdminService
+    return success_response(RechargeAdminService.task_detail(task_no))
+
+
+@recharge_bp.route('/admin/tasks/<task_no>/refresh', methods=['POST'], defaults={'action': 'refresh'})
+@recharge_bp.route('/admin/tasks/<task_no>/recall', methods=['POST'], defaults={'action': 'recall'})
+@recharge_bp.route('/admin/tasks/<task_no>/close', methods=['POST'], defaults={'action': 'close'})
+def admin_task_action(task_no, action):
+    from app.services.recharge_admin_service import RechargeAdminService
+    return success_response(RechargeAdminService.perform_action(task_no, action, request.get_json()))
+
+
+@recharge_bp.route('/admin/tasks/<task_no>/mutations/<operation_id>/reconcile', methods=['POST'])
+def reconcile_unknown_mutation(task_no, operation_id):
+    from app.services.auth_service import get_admin_session_actor_id
+
+    actor_id = get_admin_session_actor_id()
+    if actor_id is None:
+        return error_response('请先登录管理员账号', 401)
+    result = RechargeService.reconcile_unknown_mutation(
+        task_no, operation_id, request.get_json(silent=True) or {}, actor_id,
+    )
+    return success_response(result, '操作人工对账已完成')
+
+
+@recharge_bp.route('/admin/tasks/<task_no>/mutations/current', methods=['GET'])
+def get_task_mutation(task_no):
+    from app.services.auth_service import get_admin_session_actor_id
+
+    if get_admin_session_actor_id() is None:
+        return error_response('请先登录管理员账号', 401)
+    return success_response(RechargeService.get_task_mutation(task_no))
 
 
 @recharge_bp.route('/tasks/lookup', methods=['POST'])
@@ -390,7 +457,7 @@ def download_invoice():
         billing_inv = RechargeService.find_mock_invoice(safe_code)
         if billing_inv:
             content = (
-                f"GoogleManager 账单收据凭据\n"
+                f"Chat GPT充值中心 账单收据凭据\n"
                 f"----------------------------------------\n"
                 f"账单编号: {billing_inv.get('id', safe_code)}\n"
                 f"对账标识: {billing_inv.get('slug', safe_code)}\n"
@@ -422,7 +489,7 @@ def download_invoice():
         if task.redeem_code and len(task.redeem_code) > 8 else '已隐藏'
     )
     content = (
-        f"GoogleManager 充值任务对账凭据\n"
+        f"Chat GPT充值中心 充值任务对账凭据\n"
         f"----------------------------------------\n"
         f"任务编号: {task.task_no}\n"
         f"关联卡密: {masked_code}\n"

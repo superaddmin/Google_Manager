@@ -25,6 +25,7 @@ from app import db
 from app.models.recharge_task import RechargeTask
 from app.models.recharge_operation import RechargeOperation
 from app.models.recharge_mutation import RechargeMutation
+from app.models.recharge_mutation_reconciliation import RechargeMutationReconciliation
 from app.models.recharge_billing_mutation import RechargeBillingMutation
 from app.models.recharge_task_access import RechargeTaskAccess
 from app.models.recharge_reconciliation import RechargeReconciliation
@@ -350,6 +351,12 @@ class RechargeService:
 
     @classmethod
     def validate_redeem_code(cls, redeem_code):
+        from app.services.cdk_service import guard_legacy_code
+        guard_legacy_code(redeem_code)
+        return cls._validate_provider_code(redeem_code)
+
+    @classmethod
+    def _validate_provider_code(cls, redeem_code):
         """验证 CDK 卡密有效性与对应套餐"""
         mode = cls.ensure_enabled()
         if not isinstance(redeem_code, str):
@@ -510,6 +517,8 @@ class RechargeService:
     def create_task(cls, payload):
         """创建充值任务（先完成契约核验）"""
         mode = cls.ensure_enabled()
+        from app.services.cdk_service import guard_legacy_code
+        guard_legacy_code(payload.get('redeem_code') if isinstance(payload, dict) else None)
         valid_data = cls.validate_task_creation_contract(payload)
         code = valid_data["redeem_code"]
 
@@ -567,34 +576,40 @@ class RechargeService:
         upstream_payload.pop('challenge_token', None)
         upstream_payload["idempotency_key"] = task_no
         upstream_payload["client_task_no"] = task_no
+        snapshot = cls._task_snapshot(db_task)
 
         try:
             upstream_res = cls._upstream_post("/user/tasks", upstream_payload)
         except RechargeUpstreamError as err:
             # 网络超时/连接失败：更新为 unknown 待核对状态，保留数据库凭据以便幂等查验与对账恢复
-            cls._mark_unknown(task_no)
+            cls._mark_unknown(task_no, snapshot)
             raise
         except Exception as err:
-            cls._mark_unknown(task_no)
+            cls._mark_unknown(task_no, snapshot)
             raise RechargeUpstreamError('请求上游接口异常，任务待核对') from err
 
         # 3. 校验上游业务响应结果
         if not isinstance(upstream_res, dict) or upstream_res.get('ok') is not True:
-            cls._mark_unknown(task_no)
+            cls._mark_unknown(task_no, snapshot)
             raise RechargeUpstreamError('上游尚未确认任务结果，请查询核对，不要重复提交')
 
         # 4. 上游明确受理成功，更新为最终处理中状态
         persisted = RechargeTask.query.filter_by(task_no=task_no).one()
         try:
             return cls._reconcile_task(
-                persisted, upstream_res.get('task'), require_client_task_no=True
+                persisted, upstream_res.get('task'), require_client_task_no=True, snapshot=snapshot
             )
         except RechargeUpstreamError:
-            cls._mark_unknown(task_no)
+            cls._mark_unknown(task_no, snapshot)
             raise
 
     @classmethod
-    def _mark_unknown(cls, task_no):
+    def _mark_unknown(cls, task_no, snapshot=None):
+        if snapshot is not None:
+            task = RechargeTask.query.filter_by(task_no=task_no).one()
+            if not cls._lock_task_snapshot(task, snapshot):
+                db.session.rollback()
+                return
         RechargeTask.query.filter(
             RechargeTask.task_no == task_no,
             RechargeTask.status.in_(('pending', 'processing', 'unknown')),
@@ -616,7 +631,7 @@ class RechargeService:
             raise RechargeContractError('人工对账必须显式确认 confirmed=True')
 
         resolution = payload.get('resolution')
-        if resolution not in {'created', 'not_created'}:
+        if not isinstance(resolution, str) or resolution not in {'created', 'not_created'}:
             raise RechargeContractError('对账结论仅支持 created 或 not_created')
 
         evidence = payload.get('evidence')
@@ -626,7 +641,7 @@ class RechargeService:
         reference = evidence.get('reference')
         evidence_sha256 = evidence.get('sha256')
         observed_at = evidence.get('observed_at')
-        if source not in cls.RECONCILIATION_EVIDENCE_SOURCES:
+        if not isinstance(source, str) or source not in cls.RECONCILIATION_EVIDENCE_SOURCES:
             raise RechargeContractError('上游证据来源无效')
         if (
             not isinstance(reference, str)
@@ -668,7 +683,7 @@ class RechargeService:
         status = remote.get('status')
         if status == 'success':
             status = 'completed'
-        if status not in {'pending', 'processing', 'completed', 'failed', 'recalled', 'closed'}:
+        if not isinstance(status, str) or status not in {'pending', 'processing', 'completed', 'failed', 'recalled', 'closed'}:
             raise RechargeContractError('上游任务状态不能证明任务已创建')
         upstream_task_no = remote.get('task_no')
         client_task_no = remote.get('client_task_no')
@@ -897,6 +912,142 @@ class RechargeService:
         }
 
     @classmethod
+    def get_task_mutation(cls, task_no):
+        if cls.ensure_enabled() != 'live':
+            raise RechargeContractError('操作对账仅适用于 live 充值任务')
+        if not isinstance(task_no, str) or not 1 <= len(task_no) <= 64:
+            raise RechargeContractError('任务编号格式无效')
+        row = db.session.query(RechargeTask, RechargeMutation).join(
+            RechargeMutation, RechargeMutation.task_no == RechargeTask.task_no,
+        ).filter(RechargeTask.task_no == task_no, RechargeTask.is_mock.is_(False)).first()
+        if row is None:
+            raise RechargeContractError('未找到该 live 任务的操作记录')
+        task, mutation = row
+        return {
+            'task': task.to_public_dict(),
+            'mutation': {
+                'task_no': task.task_no, 'operation_id': mutation.operation_id,
+                'action': mutation.action, 'state': mutation.state,
+                'started_at': datetime.fromtimestamp(mutation.started_at, timezone.utc).isoformat(),
+            },
+        }
+
+    @classmethod
+    def _existing_mutation_reconciliation_result(cls, operation_id, request_fingerprint):
+        audit = db.session.get(RechargeMutationReconciliation, operation_id)
+        if audit is None:
+            return None
+        if not hmac.compare_digest(audit.request_fingerprint, request_fingerprint):
+            raise RechargeReconciliationConflictError('该操作已有不同的人工对账结论')
+        task = RechargeTask.query.filter_by(task_no=audit.task_no).populate_existing().one()
+        return {'task': task.to_public_dict(), 'reconciliation': audit.to_dict(), 'replayed': True}
+
+    @classmethod
+    def reconcile_unknown_mutation(cls, task_no, operation_id, payload, actor_id):
+        if cls.ensure_enabled() != 'live':
+            raise RechargeContractError('人工对账仅适用于 live 充值任务')
+        if not isinstance(actor_id, str) or not re.fullmatch(r'admin:[0-9a-f]{24}', actor_id):
+            raise RechargeContractError('管理员审计身份无效')
+        if not isinstance(operation_id, str) or not re.fullmatch(r'[0-9a-f]{32}', operation_id):
+            raise RechargeContractError('操作编号格式无效')
+        if not isinstance(payload, dict):
+            raise RechargeContractError('请求数据格式错误')
+        action = payload.get('action')
+        if not isinstance(action, str) or action not in {'recall', 'close'}:
+            raise RechargeContractError('操作类型仅支持 recall 或 close')
+        if payload.get('resolution') != 'not_applied':
+            raise RechargeContractError('操作失败结案必须明确确认 not_applied')
+        basis = payload.get('basis')
+        if (
+            not isinstance(basis, str) or not 8 <= len(basis.strip()) <= 1024
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in basis)
+        ):
+            raise RechargeContractError('必须提供该操作未执行的归档证据依据，不能仅凭超时或任务查询结案')
+        normalized = cls._normalize_reconciliation_payload(task_no, {**payload, 'resolution': 'created'})
+        normalized.update(operation_id=operation_id, action=action, resolution='not_applied', basis=basis.strip())
+        fingerprint = cls._reconciliation_fingerprint(normalized)
+        try:
+            return cls._apply_unknown_mutation_reconciliation(normalized, fingerprint, actor_id)
+        except (RechargeReconciliationConflictError, IntegrityError) as error:
+            db.session.rollback()
+            replay = cls._existing_mutation_reconciliation_result(operation_id, fingerprint)
+            if replay is not None:
+                return replay
+            raise RechargeReconciliationConflictError('操作状态已变化或证据已被使用，请重新核对') from error
+        except Exception:
+            db.session.rollback()
+            raise
+
+    @classmethod
+    def _apply_unknown_mutation_reconciliation(cls, normalized, fingerprint, actor_id):
+        task_no = normalized['task_no']
+        operation_id = normalized['operation_id']
+        action = normalized['action']
+        replay = cls._existing_mutation_reconciliation_result(operation_id, fingerprint)
+        if replay is not None:
+            return replay
+        task = RechargeTask.query.filter_by(task_no=task_no, is_mock=False).first()
+        if task is None:
+            raise RechargeContractError('未找到待对账的 live 任务')
+        snapshot = cls._task_snapshot(task)
+        if snapshot[2:5] != (operation_id, action, 'unknown'):
+            raise RechargeReconciliationConflictError('任务、操作编号、类型或 unknown 状态不匹配')
+        if not cls._lock_task_snapshot(task, snapshot):
+            raise RechargeReconciliationConflictError('任务或操作状态已变化')
+        db.session.expire_all()
+        mutation = db.session.get(RechargeMutation, task_no)
+        operation = db.session.get(RechargeOperation, task_no)
+        if operation is None:
+            raise RechargeReconciliationConflictError('任务缺少原始幂等操作记录')
+        if normalized['evidence_observed_at'].replace(tzinfo=timezone.utc).timestamp() < mutation.started_at:
+            raise RechargeContractError('上游证据早于本次操作，不能用于失败结案')
+        remote = normalized['remote_task']
+        try:
+            upstream_no = cls._validate_upstream_task_identity(task, remote, operation, require_client_task_no=True)
+        except RechargeUpstreamError as error:
+            raise RechargeContractError(str(error)) from error
+        final_status = remote['status']
+        if final_status == {'recall': 'recalled', 'close': 'closed'}[action]:
+            raise RechargeContractError('上游任务已处于该操作成功终态，不能判定未执行')
+        previous_status = task.status
+        if (
+            previous_status in {'completed', 'success', 'failed', 'recalled', 'closed'}
+            and final_status != ('completed' if previous_status == 'success' else previous_status)
+        ) or (previous_status == 'processing' and final_status == 'pending'):
+            raise RechargeReconciliationConflictError('证据与本地已确认状态冲突，不能回退任务状态')
+        evidence_fingerprint = cls._reconciliation_evidence_fingerprint(normalized)
+        if RechargeReconciliation.query.filter_by(evidence_fingerprint=evidence_fingerprint).first():
+            raise RechargeReconciliationConflictError('创建对账证据不能用于本次操作失败结案')
+        audit = RechargeMutationReconciliation(
+            operation_id=operation_id, task_no=task_no, action=action,
+            resolution='not_applied', basis=normalized['basis'], request_fingerprint=fingerprint,
+            evidence_fingerprint=evidence_fingerprint,
+            evidence_source=normalized['evidence_source'], evidence_reference=normalized['evidence_reference'],
+            evidence_sha256=normalized['evidence_sha256'], evidence_observed_at=normalized['evidence_observed_at'],
+            mutation_started_at=mutation.started_at, previous_state='unknown', final_state='rejected',
+            upstream_task_no=upstream_no, previous_status=previous_status, final_status=final_status,
+            actor_id=actor_id,
+        )
+        updated = RechargeMutation.query.filter_by(
+            task_no=task_no, operation_id=operation_id, action=action,
+            state='unknown', started_at=mutation.started_at,
+        ).update({'state': 'rejected'}, synchronize_session=False)
+        if updated != 1:
+            raise RechargeReconciliationConflictError('操作状态已变化，禁止覆盖')
+        task.status = final_status
+        task.status_text = cls.TASK_STATUS_TEXT[final_status]
+        task.notice = '管理员已依据归档证据确认本次操作未执行；后续操作将使用新的操作编号。'
+        task.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        if remote['card_last4']:
+            task.card_last4 = remote['card_last4']
+        operation.upstream_task_no = upstream_no
+        if final_status in {'failed', 'recalled'}:
+            operation.active_key = None
+        db.session.add(audit)
+        db.session.commit()
+        return {'task': task.to_public_dict(), 'reconciliation': audit.to_dict(), 'replayed': False}
+
+    @classmethod
     def _persist_new_task(cls, task, mode):
         operation = RechargeOperation(
             task_no=task.task_no,
@@ -905,12 +1056,17 @@ class RechargeService:
         try:
             db.session.add(task)
             db.session.flush()
+            from app.services.cdk_service import guard_legacy_code
+            guard_legacy_code(task.redeem_code)
             RechargeTaskAccess.bind(task.task_no)
             db.session.add(operation)
             db.session.commit()
         except IntegrityError as error:
             db.session.rollback()
             raise RechargeContractError('该卡密已有正在执行或待核对中的充值任务，请勿重复提交') from error
+        except Exception:
+            db.session.rollback()
+            raise
 
     @classmethod
     def _public_remote_task(cls, remote, is_mock=False):
@@ -1144,19 +1300,7 @@ class RechargeService:
         return public
 
     @classmethod
-    def _reconcile_task(cls, task, remote, require_client_task_no=False):
-        states = {
-            'pending': '等待处理', 'processing': '任务处理中', 'unknown': '待核对',
-            'completed': '已完成', 'failed': '已失败', 'recalled': '已撤回', 'closed': '已关闭',
-        }
-        if not isinstance(remote, dict):
-            raise RechargeUpstreamError('上游缺少有效的任务状态')
-        status = remote.get('status')
-        if status == 'success':
-            status = 'completed'
-        if not isinstance(status, str) or status not in states:
-            raise RechargeUpstreamError('上游返回未知任务状态，需人工核对')
-        operation = db.session.get(RechargeOperation, task.task_no)
+    def _validate_upstream_task_identity(cls, task, remote, operation, require_client_task_no=False):
         # 初次受理必须回显本地幂等号；后续尚未绑定远端编号时，至少
         # 回显本地任务号或精确卡密，避免仅凭状态把其它任务写回本地。
         client_matches = remote.get('client_task_no') == task.task_no
@@ -1191,6 +1335,64 @@ class RechargeService:
             RechargeOperation.task_no != task.task_no,
         ).first() is not None:
             raise RechargeUpstreamError('上游任务编号已绑定其他本地任务，拒绝回写状态')
+        return upstream_no
+
+    @classmethod
+    def _task_snapshot(cls, task):
+        return tuple(db.session.query(
+            RechargeTask.status, RechargeTask.updated_at,
+            RechargeMutation.operation_id, RechargeMutation.action,
+            RechargeMutation.state, RechargeMutation.started_at,
+        ).outerjoin(RechargeMutation, RechargeMutation.task_no == RechargeTask.task_no).filter(
+            RechargeTask.id == task.id,
+        ).one())
+
+    @classmethod
+    def _lock_task_snapshot(cls, task, snapshot):
+        status, updated_at, operation_id, action, state, started_at = snapshot
+        mutation = RechargeMutation.query.filter_by(task_no=task.task_no)
+        if operation_id is None:
+            mutation_matches = ~mutation.exists()
+        else:
+            mutation_matches = mutation.filter_by(
+                operation_id=operation_id, action=action, state=state, started_at=started_at,
+            ).exists()
+        return RechargeTask.query.filter(
+            RechargeTask.id == task.id, RechargeTask.status == status,
+            RechargeTask.updated_at == updated_at, mutation_matches,
+        ).update({'updated_at': RechargeTask.updated_at}, synchronize_session=False) == 1
+
+    @classmethod
+    def _reconcile_task(cls, task, remote, require_client_task_no=False, snapshot=None):
+        snapshot = snapshot if snapshot is not None else cls._task_snapshot(task)
+        try:
+            if not cls._lock_task_snapshot(task, snapshot):
+                db.session.rollback()
+                db.session.refresh(task)
+                return task.to_public_dict()
+            db.session.expire_all()
+            result = cls._apply_upstream_task(task, remote, require_client_task_no)
+            db.session.commit()
+            return result
+        except Exception:
+            db.session.rollback()
+            raise
+
+    @classmethod
+    def _apply_upstream_task(cls, task, remote, require_client_task_no=False):
+        states = {
+            'pending': '等待处理', 'processing': '任务处理中', 'unknown': '待核对',
+            'completed': '已完成', 'failed': '已失败', 'recalled': '已撤回', 'closed': '已关闭',
+        }
+        if not isinstance(remote, dict):
+            raise RechargeUpstreamError('上游缺少有效的任务状态')
+        status = remote.get('status')
+        if status == 'success':
+            status = 'completed'
+        if not isinstance(status, str) or status not in states:
+            raise RechargeUpstreamError('上游返回未知任务状态，需人工核对')
+        operation = db.session.get(RechargeOperation, task.task_no)
+        upstream_no = cls._validate_upstream_task_identity(task, remote, operation, require_client_task_no)
         mutation = db.session.get(RechargeMutation, task.task_no)
         if mutation and mutation.state == 'pending':
             return task.to_public_dict()
@@ -1269,6 +1471,8 @@ class RechargeService:
     def lookup_task(cls, redeem_code):
         """按卡密查询任务进度（修复死锁：不持锁调用可能加锁的子方法）"""
         mode = cls.ensure_enabled()
+        from app.services.cdk_service import guard_legacy_code
+        guard_legacy_code(redeem_code)
         if not isinstance(redeem_code, str):
             raise RechargeContractError("CDK 卡密或任务编号必须是文本")
         code = redeem_code.strip()
@@ -1285,11 +1489,12 @@ class RechargeService:
 
         task = cls._find_latest_task_by_code(code)
         if mode == 'live':
+            snapshot = cls._task_snapshot(task) if task else None
             upstream_res = cls._upstream_post("/user/tasks/lookup", {"redeem_code": code})
             if not isinstance(upstream_res, dict) or upstream_res.get('ok') is not True:
                 raise RechargeUpstreamError('上游任务查询失败，本地状态未变更')
             if task:
-                return cls._reconcile_task(task, upstream_res.get('task'))
+                return cls._reconcile_task(task, upstream_res.get('task'), snapshot=snapshot)
             remote = upstream_res.get('task')
             if not isinstance(remote, dict) or not remote.get('status'):
                 raise RechargeUpstreamError('上游缺少有效的任务状态')
@@ -1325,7 +1530,13 @@ class RechargeService:
         task = RechargeTask.query.filter_by(task_no=no, is_mock=mode == 'mock').first()
         if not task:
             raise RechargeContractError(f"未找到流水号为 {no} 的任务记录")
+        from app.models.cdk import CdkRedemption
+        managed = CdkRedemption.query.filter_by(task_no=no).first()
+        if managed:
+            from app.services.cdk_redemption import refresh
+            return refresh(managed.id)['task']
         if mode == 'live':
+            snapshot = cls._task_snapshot(task)
             operation = db.session.get(RechargeOperation, task.task_no)
             if not operation or not operation.upstream_task_no:
                 upstream_res = cls._upstream_post('/user/tasks/lookup', {'redeem_code': task.redeem_code})
@@ -1333,7 +1544,7 @@ class RechargeService:
                 upstream_res = cls._upstream_get(f"/user/tasks/{urllib.parse.quote(operation.upstream_task_no, safe='')}")
             if not isinstance(upstream_res, dict) or upstream_res.get('ok') is not True:
                 raise RechargeUpstreamError('上游任务查询失败，本地状态未变更')
-            cls._reconcile_task(task, upstream_res.get('task'))
+            cls._reconcile_task(task, upstream_res.get('task'), snapshot=snapshot)
         return task.to_public_dict()
 
     @classmethod
@@ -1360,6 +1571,10 @@ class RechargeService:
             raise RechargeContractError("单次批量查询最多支持 50 个卡密")
 
         if mode == 'live':
+            local_tasks = {code: cls._find_latest_task_by_code(code) for code in clean_codes}
+            snapshots = {
+                code: cls._task_snapshot(task) for code, task in local_tasks.items() if task is not None
+            }
             upstream_res = cls._upstream_post("/user/tasks/lookup-batch", {"redeem_codes": clean_codes})
             if isinstance(upstream_res, dict) and upstream_res.get("ok") is True:
                 results = upstream_res.get('results')
@@ -1385,7 +1600,7 @@ class RechargeService:
                 # 将状态误绑定到另一张卡密。
                 for code in clean_codes:
                     result = result_by_code[code]
-                    task = cls._find_latest_task_by_code(code)
+                    task = local_tasks[code]
                     safe_result = {
                         'ok': result.get('ok') is True,
                         'redeem_code': code,
@@ -1395,7 +1610,7 @@ class RechargeService:
                         if isinstance(remote_task, dict) and remote_task is not result:
                             remote_task = dict(remote_task)
                             remote_task.setdefault('redeem_code', code)
-                        safe_result.update(cls._reconcile_task(task, remote_task))
+                        safe_result.update(cls._reconcile_task(task, remote_task, snapshot=snapshots[code]))
                     else:
                         remote_task = result.get('task', result)
                         if isinstance(remote_task, dict):
@@ -1459,6 +1674,9 @@ class RechargeService:
                     or remote.get('redeem_code') not in (None, '', task.redeem_code)
                 ):
                     raise RechargeUpstreamError('上游操作结果缺少可验证的本地身份或终态')
+                cls._validate_upstream_task_identity(
+                    task, remote, db.session.get(RechargeOperation, task.task_no), require_client_task_no=True,
+                )
             return operation_id
         except Exception:
             db.session.rollback()
@@ -1478,6 +1696,8 @@ class RechargeService:
 
         raw_code = data.get("redeem_code")
         raw_email = data.get("email")
+        from app.services.cdk_service import guard_legacy_code
+        guard_legacy_code(raw_code)
         if not isinstance(raw_code, str) or not isinstance(raw_email, str):
             raise RechargeContractError("卡密和账号邮箱必须是文本")
         code = raw_code.strip()
@@ -1509,6 +1729,9 @@ class RechargeService:
             updated = RechargeTask.query.filter(
                 RechargeTask.id == task.id,
                 RechargeTask.status == expected_status,
+                RechargeMutation.query.filter_by(
+                    task_no=task.task_no, operation_id=operation_id, action='recall',
+                ).filter(RechargeMutation.state.in_(('pending', 'unknown'))).exists(),
             ).update({'status': 'recalled', 'status_text': '已撤回（可重新提交）',
                       'notice': '任务已撤回，您可以核对凭证后重新提交。'}, synchronize_session=False)
             if updated != 1:
@@ -1519,7 +1742,9 @@ class RechargeService:
             operation = db.session.get(RechargeOperation, task.task_no)
             if operation:
                 operation.active_key = None
-            RechargeMutation.finish(task.task_no, operation_id, 'done')
+            if not RechargeMutation.finish(task.task_no, operation_id, 'done'):
+                db.session.rollback()
+                raise RechargeContractError('操作状态已变化，请重新查询')
             db.session.commit()
             db.session.refresh(task)
             return task.to_public_dict()
@@ -1536,6 +1761,8 @@ class RechargeService:
 
         raw_code = data.get("redeem_code")
         raw_email = data.get("email")
+        from app.services.cdk_service import guard_legacy_code
+        guard_legacy_code(raw_code)
         if not isinstance(raw_code, str) or not isinstance(raw_email, str):
             raise RechargeContractError("卡密和账号邮箱必须是文本")
         code = raw_code.strip()
@@ -1564,7 +1791,11 @@ class RechargeService:
         cls._request_mutation(task, 'close', mode, operation_id, expected_status)
 
         with cls._lock:
-            updated = RechargeTask.query.filter_by(id=task.id, status=expected_status).update(
+            updated = RechargeTask.query.filter_by(id=task.id, status=expected_status).filter(
+                RechargeMutation.query.filter_by(
+                    task_no=task.task_no, operation_id=operation_id, action='close',
+                ).filter(RechargeMutation.state.in_(('pending', 'unknown'))).exists(),
+            ).update(
                 {'status': 'closed', 'status_text': '已关闭（卡密已注销）',
                  'notice': '任务已终结，对应 CDK 卡密已注销作废。'}, synchronize_session=False)
             if updated != 1:
@@ -1572,7 +1803,9 @@ class RechargeService:
                 RechargeMutation.finish(task.task_no, operation_id, 'unknown')
                 db.session.commit()
                 raise RechargeContractError('任务状态已变化，请刷新查询后再操作')
-            RechargeMutation.finish(task.task_no, operation_id, 'done')
+            if not RechargeMutation.finish(task.task_no, operation_id, 'done'):
+                db.session.rollback()
+                raise RechargeContractError('操作状态已变化，请重新查询')
             db.session.commit()
             db.session.refresh(task)
             return task.to_public_dict()

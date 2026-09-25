@@ -3,6 +3,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from cryptography.fernet import Fernet
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from app import create_app, db
 from tests.auth_helpers import login_admin
@@ -99,6 +101,40 @@ class RuntimeReliabilityTestCase(unittest.TestCase):
         self.assertTrue(result['ignored'])
         service.assert_not_called()
         self.assertEqual(self.watch.history_id, '100')
+
+    def test_deleted_message_is_skipped_without_blocking_later_notifications(self):
+        service = self.history_service([
+            self.history_page('deleted-message', nextPageToken='next'),
+            self.history_page('existing-message'), self.history_page('deleted-message'),
+        ])
+        missing = HttpError(Response({'status': '404'}), b'{"error":{"message":"Not found"}}')
+        with patch.object(GmailService, '_service', return_value=service), patch.object(
+            GmailService, 'modify_message', side_effect=[missing, {'id': 'existing-message'}],
+        ) as modify, patch.object(GmailService, 'get_message', side_effect=missing):
+            result = GmailService.process_notification(self.connection.email, '200')
+            self.assertEqual(result['ruleSummary']['failed'], 0)
+            self.assertEqual(result['ruleSummary']['succeeded'], 1)
+            self.assertEqual(self.watch.history_id, '200')
+            GmailService.process_notification(self.connection.email, '201')
+        self.assertEqual(modify.call_count, 2)
+        skipped = GmailTaskLog.query.filter_by(message_id='deleted-message').one()
+        self.assertEqual(skipped.status, 'skipped')
+        self.assertEqual(skipped.to_dict()['resultData'], {'reason': 'message_not_found'})
+        self.assertEqual(self.watch.history_id, '201')
+
+    def test_missing_label_or_forbidden_message_does_not_advance_cursor(self):
+        for status_code in (404, 403):
+            with self.subTest(status=status_code):
+                service = self.history_service([self.history_page('existing-message')])
+                error = HttpError(Response({'status': str(status_code)}), b'{"error":{"message":"Denied"}}')
+                with patch.object(GmailService, '_service', return_value=service), patch.object(
+                    GmailService, 'modify_message', side_effect=error,
+                ), patch.object(GmailService, 'get_message', return_value={'id': 'existing-message'}) as lookup:
+                    with self.assertRaises(GmailServiceError):
+                        GmailService.process_notification(self.connection.email, '200')
+                self.assertEqual(lookup.call_count, 1 if status_code == 404 else 0)
+                self.assertEqual(self.watch.history_id, '100')
+                self.assertEqual(GmailTaskLog.query.one().status, 'failed')
 
     def test_renew_watch_preserves_unprocessed_cursor(self):
         self.app.config['GMAIL_PUBSUB_TOPIC'] = 'synthetic-topic'

@@ -6,13 +6,19 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a registry candidate from main (does not authorize deployment)
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-gate-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-gate-${{ github.ref }}-${{ inputs.publish || false }}
+  cancel-in-progress: ${{ !inputs.publish }}
 
 env:
   NODE_VERSION: 24.21.0
@@ -44,6 +50,9 @@ jobs:
             frontend/package-lock.json
             googlemail/package-lock.json
 
+      - name: Test host preparation with Linux root permissions
+        run: sudo python3 -B -m unittest tests.test_compose_host_preparation -v
+
       - name: Install locked dependencies
         run: |
           python -m pip install --disable-pip-version-check -r requirements.txt
@@ -65,7 +74,14 @@ jobs:
         env:
           FLASK_ENV: production
           GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH: ${{ runner.temp }}/google-manager-chrome/chrome
-        run: node googlemail/src/startup-check.mjs
+        run: |
+          if ! node googlemail/src/startup-check.mjs; then
+            echo 'Host Chromium failed; the container seccomp profile does not change host AppArmor policy.' >&2
+            if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+              cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+            fi
+            exit 1
+          fi
 
       - name: Run Python tests
         run: python -m unittest discover -s tests -p 'test_*.py'
@@ -83,7 +99,7 @@ jobs:
         env:
           FLASK_ENV: production
           GOOGLE_MANAGER_CHROME_EXECUTABLE_PATH: ${{ runner.temp }}/google-manager-chrome/chrome
-        run: node --test tests/frontend-ui.test.mjs tests/recharge-ui.test.mjs tests/recharge-flow.test.mjs
+        run: node --test tests/frontend-ui.test.mjs tests/recharge-ui.test.mjs tests/recharge-flow.test.mjs tests/cdk-flow.test.mjs
 
   dependency-audit:
     name: Dependency and repository audit
@@ -134,28 +150,120 @@ jobs:
 
   container:
     name: Production image, SBOM, and vulnerability scan
+    needs: [tests, dependency-audit]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Validate registry publication target
+        id: release-target
+        env:
+          PUBLISH_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.publish || false }}
+          RELEASE_IMAGE: ${{ vars.RELEASE_IMAGE }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+
+          publish = os.environ['PUBLISH_IMAGE'] == 'true'
+          image = os.environ.get('RELEASE_IMAGE', '')
+          registry = ''
+          tag = 'google-manager:ci'
+          if publish:
+              if os.environ['GITHUB_EVENT_NAME'] != 'workflow_dispatch' or os.environ['GITHUB_REF'] != 'refs/heads/main':
+                  raise SystemExit('Registry publication requires a manual run on main.')
+              if not re.fullmatch(r'[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]+)?/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*', image):
+                  raise SystemExit('Set RELEASE_IMAGE to a lowercase registry/repository without a tag or digest.')
+              registry = image.split('/', 1)[0]
+              hostname = registry.split(':', 1)[0]
+              if '.' not in hostname or hostname.endswith(('.invalid', '.test', '.example', '.localhost')):
+                  raise SystemExit('RELEASE_IMAGE requires an explicit registry hostname.')
+              tag = f"{image}:{os.environ['GITHUB_SHA']}-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
+              output.write(f'publish={str(publish).lower()}\nregistry={registry}\ntag={tag}\n')
+          PY
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
+      - name: Authenticate to the release registry
+        if: ${{ steps.release-target.outputs.publish == 'true' }}
+        env:
+          REGISTRY: ${{ steps.release-target.outputs.registry }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$REGISTRY" == 'ghcr.io' && -z "$REGISTRY_USERNAME" && -z "$REGISTRY_PASSWORD" ]]; then
+            printf '%s' "$GHCR_TOKEN" | docker login "$REGISTRY" --username "$GITHUB_ACTOR" --password-stdin
+          else
+            if [[ -z "$REGISTRY_USERNAME" || -z "$REGISTRY_PASSWORD" ]]; then
+              echo 'Configure both REGISTRY_USERNAME and REGISTRY_PASSWORD for this registry.' >&2
+              exit 1
+            fi
+            printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin
+          fi
+
       - name: Build immutable production image
         id: image-build
+        env:
+          PUBLISH_IMAGE: ${{ steps.release-target.outputs.publish }}
+          BUILD_TAG: ${{ steps.release-target.outputs.tag }}
+          RELEASE_IMAGE: ${{ vars.RELEASE_IMAGE }}
+          BUILDX_METADATA_PROVENANCE: max
         run: |
-          docker buildx build \
-            --pull \
-            --load \
-            --metadata-file build-metadata.json \
-            --tag google-manager:ci \
-            .
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          build_options=(
+            --platform linux/amd64 --pull --metadata-file build-metadata.json
+            --label "org.opencontainers.image.revision=$GITHUB_SHA"
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+            --tag "$BUILD_TAG"
+          )
+          if [[ "$PUBLISH_IMAGE" == 'true' ]]; then
+            build_options+=(--push --provenance=mode=max)
+          else
+            build_options+=(--load)
+          fi
+          docker buildx build "${build_options[@]}" .
+          image_digest=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import re
+
+          digest = json.loads(Path('build-metadata.json').read_text())['containerimage.digest']
+          if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
+              raise SystemExit('Build metadata does not contain an immutable image digest.')
+          print(digest)
+          PY
+          )
+          image_reference="$BUILD_TAG"
+          if [[ "$PUBLISH_IMAGE" == 'true' ]]; then
+            image_reference="${RELEASE_IMAGE}@${image_digest}"
+            docker pull --platform linux/amd64 "$image_reference"
+          fi
+          printf 'image=%s\ndigest=%s\n' "$image_reference" "$image_digest" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$image_reference" > image-digest.txt
+          docker image inspect "$image_reference" > image-inspect.json
 
       - name: Verify runtime contents and versions
+        id: runtime-check
+        env:
+          IMAGE_REF: ${{ steps.image-build.outputs.image }}
         run: |
-          docker run --rm google-manager:ci sh -euc '
+          docker run --rm --init --network none --shm-size=256m \
+            --security-opt "seccomp=$GITHUB_WORKSPACE/deploy/chromium-seccomp.json" \
+            "$IMAGE_REF" sh -euc '
             test "$(id -u)" = "10001"
             test "$(node --version)" = "v24.21.0"
             python --version
@@ -164,61 +272,75 @@ jobs:
             test ! -e /app/googlemail/node_modules/vitest
             test ! -e /app/frontend
           '
-          docker run --rm --init --network none google-manager:ci node googlemail/src/startup-check.mjs
+          docker run --rm --init --network none --shm-size=256m \
+            --security-opt "seccomp=$GITHUB_WORKSPACE/deploy/chromium-seccomp.json" \
+            "$IMAGE_REF" node googlemail/src/startup-check.mjs
 
-      - name: Validate Compose configuration
+      - name: Smoke test the production Compose services and bind mounts
+        id: compose-smoke
         env:
-          ADMIN_PASSWORD: ci-only-password-value
-          SECRET_KEY: ci-only-secret-key-value-at-least-32-characters
-          GMAIL_TOKEN_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
-          RECHARGE_MODE: disabled
-          GOOGLE_MANAGER_IMAGE: google-manager:ci
-        run: docker compose --env-file /dev/null config --quiet
-
-      - name: Smoke test application and worker entrypoints
+          IMAGE_REF: ${{ steps.image-build.outputs.image }}
         shell: bash
         run: |
           set -euo pipefail
-          volume_name="google-manager-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          container_id=''
-          worker_id=''
+          export SMOKE_ROOT
+          SMOKE_ROOT=$(mktemp -d "$RUNNER_TEMP/google-manager-compose.XXXXXX")
+          mkdir -p "$SMOKE_ROOT/deploy"
+          cp docker-compose.yml "$SMOKE_ROOT/docker-compose.yml"
+          cp deploy/prepare-compose-host.sh deploy/chromium-seccomp.json "$SMOKE_ROOT/deploy/"
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          import secrets
+
+          root = Path(os.environ['SMOKE_ROOT'])
+          values = {
+              'GOOGLE_MANAGER_IMAGE': os.environ['IMAGE_REF'],
+              'ADMIN_PASSWORD': secrets.token_urlsafe(32),
+              'SECRET_KEY': secrets.token_urlsafe(48),
+              'GMAIL_TOKEN_ENCRYPTION_KEY': base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('ascii'),
+              'RECHARGE_MODE': 'disabled',
+          }
+          for name, content in {
+              '.env': ''.join(f'{key}={value}\n' for key, value in values.items()),
+              'credentials.json': json.dumps({'web': {
+                  'client_id': 'ci-fixture.apps.googleusercontent.com',
+                  'client_secret': 'ci-only-synthetic-client-secret',
+                  'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
+                  'token_uri': 'https://oauth2.googleapis.com/token',
+              }}),
+          }.items():
+              descriptor = os.open(root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
+                  output.write(content)
+          PY
+          sudo bash "$SMOKE_ROOT/deploy/prepare-compose-host.sh"
+          compose=(sudo docker compose --project-name "google-manager-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            --project-directory "$SMOKE_ROOT" --env-file "$SMOKE_ROOT/.env" --file "$SMOKE_ROOT/docker-compose.yml")
           cleanup() {
-            if [[ -n "$container_id" ]]; then docker rm --force "$container_id" >/dev/null 2>&1 || true; fi
-            if [[ -n "$worker_id" ]]; then docker rm --force "$worker_id" >/dev/null 2>&1 || true; fi
-            docker volume rm "$volume_name" >/dev/null 2>&1 || true
+            "${compose[@]}" down --timeout 30 --remove-orphans >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
-          docker volume create "$volume_name" >/dev/null
-          common_env=(
-            -e ADMIN_PASSWORD=ci-only-password-value
-            -e SECRET_KEY=ci-only-secret-key-value-at-least-32-characters
-            -e GMAIL_TOKEN_ENCRYPTION_KEY=MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
-            -e RECHARGE_MODE=disabled
-          )
-          docker run --rm "${common_env[@]}" -v "$volume_name:/app/instance" \
-            google-manager:ci python -m app.manage init-db
-          container_id=$(docker run --detach "${common_env[@]}" -v "$volume_name:/app/instance" google-manager:ci)
-          worker_id=$(docker run --detach "${common_env[@]}" -v "$volume_name:/app/instance" \
-            google-manager:ci python -m app.worker)
-          for attempt in {1..30}; do
-            if docker exec "$container_id" python -c "from app.monitor import probe_readiness; raise SystemExit(0 if probe_readiness('http://127.0.0.1:8002/health/ready') else 1)" \
-              && docker exec "$worker_id" python -m app.worker --check; then
-              break
-            fi
-            if (( attempt == 30 )); then
-              docker logs "$container_id"
-              docker logs "$worker_id"
-              exit 1
-            fi
-            sleep 1
-          done
-          docker exec "$container_id" python -m app.monitor --min-free-mib 1
+          "${compose[@]}" config --quiet
+          if ! "${compose[@]}" up -d --no-build --wait --wait-timeout 180; then
+            "${compose[@]}" ps -a
+            exit 1
+          fi
+          "${compose[@]}" exec -T worker python -m app.worker --check
+          "${compose[@]}" exec -T google-manager python -m app.manage validate-db
+          "${compose[@]}" exec -T google-manager python -m app.monitor --min-free-mib 1 > container-smoke.json
 
       - name: Scan production image
+        id: image-scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_SHOW_SUPPRESSED: 'true'
         with:
-          image-ref: google-manager:ci
+          image-ref: ${{ steps.image-build.outputs.image }}
           scanners: vuln
+          list-all-pkgs: true
           format: json
           output: image-vulnerabilities.json
           severity: HIGH,CRITICAL
@@ -226,39 +348,156 @@ jobs:
           ignore-unfixed: false
 
       - name: Verify deployment tooling and private runtime files in the image
+        id: tooling-check
         if: ${{ always() && steps.image-build.outcome == 'success' }}
+        env:
+          IMAGE_REF: ${{ steps.image-build.outputs.image }}
         run: |
-          docker run --rm --network none \
+          docker run --rm --init --network none --shm-size=256m \
+            --security-opt "seccomp=$GITHUB_WORKSPACE/deploy/chromium-seccomp.json" \
             --mount type=bind,source="$GITHUB_WORKSPACE/tests",target=/app/tests,readonly \
-            google-manager:ci python -m unittest \
+            "$IMAGE_REF" python -m unittest \
             tests.test_deployment_preflight tests.test_compose_release \
             tests.test_recovery_drill tests.test_container_permissions \
-            tests.test_browser_artifacts
+            tests.test_browser_artifacts tests.test_database_validation
 
       - name: Exercise isolated recovery with the production image
+        id: recovery-check
         if: ${{ always() && steps.image-build.outcome == 'success' }}
+        env:
+          IMAGE_REF: ${{ steps.image-build.outputs.image }}
         run: |
-          docker run --rm --network none google-manager:ci \
+          docker run --rm --init --network none --shm-size=256m \
+            --security-opt "seccomp=$GITHUB_WORKSPACE/deploy/chromium-seccomp.json" \
+            "$IMAGE_REF" \
             python -m deploy.recovery_drill > recovery-drill.json
 
       - name: Generate CycloneDX SBOM
+        id: image-sbom
         if: ${{ always() && steps.image-build.outcome == 'success' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: google-manager:ci
+          image-ref: ${{ steps.image-build.outputs.image }}
           scanners: vuln
           format: cyclonedx
           output: google-manager-sbom.cdx.json
+
+      - name: Bind registry identity and validation evidence
+        id: release-evidence
+        if: ${{ !cancelled() && steps.image-build.outcome == 'success' }}
+        env:
+          PUBLISH_IMAGE: ${{ steps.release-target.outputs.publish }}
+          IMAGE_REF: ${{ steps.image-build.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.image-build.outputs.digest }}
+          CHECK_RESULTS: >-
+            {"runtime":"${{ steps.runtime-check.outcome }}",
+            "compose":"${{ steps.compose-smoke.outcome }}",
+            "scan":"${{ steps.image-scan.outcome }}",
+            "tooling":"${{ steps.tooling-check.outcome }}",
+            "recovery":"${{ steps.recovery-check.outcome }}",
+            "sbom":"${{ steps.image-sbom.outcome }}"}
+        run: |
+          python3 - <<'PY'
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          from deploy.release_bundle import BundleError, _parse_image, _validate_scan, _validate_sbom
+
+          image = os.environ['IMAGE_REF']
+          published = os.environ['PUBLISH_IMAGE'] == 'true'
+          checks = json.loads(os.environ['CHECK_RESULTS'])
+          evidence = {
+              'git_sha': os.environ['GITHUB_SHA'],
+              'platform': 'linux/amd64',
+              'image': image,
+              'build_digest': os.environ['IMAGE_DIGEST'],
+              'registry_published': published,
+              'generated_at': datetime.now(timezone.utc).isoformat(),
+              'ci_run_url': f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}/attempts/{os.environ['GITHUB_RUN_ATTEMPT']}",
+              'checks': checks,
+              'production_approved': False,
+          }
+          failure = None
+          files = ['build-metadata.json', 'image-digest.txt', 'image-inspect.json',
+                   'container-smoke.json', 'image-vulnerabilities.json',
+                   'google-manager-sbom.cdx.json', 'recovery-drill.json']
+          try:
+              if any(not Path(name).is_file() or Path(name).stat().st_size == 0 for name in files):
+                  raise ValueError('Required evidence files are missing or empty.')
+              metadata = json.loads(Path('build-metadata.json').read_text(encoding='utf-8'))
+              inspected, = json.loads(Path('image-inspect.json').read_text(encoding='utf-8'))
+              config_digest = metadata.get('containerimage.config.digest')
+              if (metadata['containerimage.digest'] != os.environ['IMAGE_DIGEST']
+                      or not re.fullmatch(r'sha256:[a-f0-9]{64}', inspected['Id'])
+                      or (config_digest is not None and inspected['Id'] not in {config_digest, metadata['containerimage.digest']})
+                      or inspected['Architecture'] != 'amd64' or inspected['Os'] != 'linux'
+                      or inspected['Config']['Labels']['org.opencontainers.image.revision'] != os.environ['GITHUB_SHA']):
+                  raise ValueError('Image identity does not match the build and source revision.')
+              evidence['image_inspect_id'] = inspected['Id']
+              evidence['image_config_digest'] = config_digest or (inspected['Id'] if inspected['Id'] != metadata['containerimage.digest'] else None)
+              if published:
+                  repository, digest = _parse_image(image)
+                  if image not in inspected.get('RepoDigests', []) or 'sha256:' + digest != os.environ['IMAGE_DIGEST']:
+                      raise ValueError('The pulled registry digest does not match the build.')
+                  scan = _validate_scan(json.loads(Path('image-vulnerabilities.json').read_text(encoding='utf-8')), image, 'amd64')
+                  if scan['high_critical_count'] or scan['suppressed_findings_count']:
+                      raise ValueError('Registry vulnerability evidence is blocked.')
+                  inventory = _validate_sbom(json.loads(Path('google-manager-sbom.cdx.json').read_text(encoding='utf-8')), repository, digest, 'amd64')
+                  Path('LICENSE-INVENTORY.json').write_text(json.dumps(inventory, indent=2) + '\n', encoding='utf-8')
+                  evidence['missing_license_metadata_count'] = inventory['missing_license_metadata_count']
+                  if inventory['missing_license_metadata_count']:
+                      print('::warning::B03 remains blocked: SBOM license metadata is incomplete; inspect LICENSE-INVENTORY.json.')
+              if (set(checks) != {'runtime', 'compose', 'scan', 'tooling', 'recovery', 'sbom'}
+                      or any(value != 'success' for value in checks.values())):
+                  raise ValueError('One or more required image checks failed or did not run.')
+          except (BundleError, KeyError, OSError, TypeError, ValueError):
+              failure = 'Image identity or required validation evidence is incomplete or mismatched.'
+          evidence['image_checks_passed'] = failure is None
+          evidence['base_images'] = dict(re.findall(r'^ARG ((?:NODE|PYTHON|RUNTIME)_IMAGE)=(.+)$', Path('Dockerfile').read_text(encoding='utf-8'), re.MULTILINE))
+          if Path('LICENSE-INVENTORY.json').is_file():
+              files.append('LICENSE-INVENTORY.json')
+          for name in ('browser-artifacts.json', 'chromium-seccomp.json'):
+              Path(name).write_bytes((Path('deploy') / name).read_bytes())
+              files.append(name)
+          evidence['file_sha256'] = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest()
+                                     for name in files if Path(name).is_file()}
+          Path('build-evidence.json').write_text(json.dumps(evidence, indent=2) + '\n', encoding='utf-8')
+          hashes = {**evidence['file_sha256'], 'build-evidence.json': hashlib.sha256(Path('build-evidence.json').read_bytes()).hexdigest()}
+          Path('EVIDENCE-SHA256SUMS').write_text(''.join(f'{digest}  {name}\n' for name, digest in sorted(hashes.items())), encoding='utf-8')
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as summary:
+              summary.write(f'Image: `{image}`\n\nRegistry published: {published}; image checks passed: {failure is None}.\n\n')
+              summary.write('This is build evidence only. B03 manifest, license review, rollback evidence and independent GO remain required.\n')
+          if failure:
+              raise SystemExit(failure)
+          PY
 
       - name: Preserve build evidence
         if: ${{ always() && steps.image-build.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: google-manager-build-evidence
+          name: google-manager-build-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build-metadata.json
+            image-digest.txt
+            image-inspect.json
+            container-smoke.json
             image-vulnerabilities.json
             google-manager-sbom.cdx.json
             recovery-drill.json
+            LICENSE-INVENTORY.json
+            browser-artifacts.json
+            chromium-seccomp.json
+            build-evidence.json
+            EVIDENCE-SHA256SUMS
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
+
+      - name: Log out of the release registry
+        if: ${{ always() && steps.release-target.outputs.publish == 'true' }}
+        env:
+          REGISTRY: ${{ steps.release-target.outputs.registry }}
+        run: docker logout "$REGISTRY"

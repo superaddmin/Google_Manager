@@ -13,6 +13,7 @@ from datetime import datetime
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import platform
 import re
@@ -39,10 +40,17 @@ EXPECTED_RELEASE_LOCKFILES = {
 }
 EXPECTED_RELEASE_PUBLIC_FILES = {
     'docker-compose.yml', 'deploy/env.production.example', 'deploy/preflight.py',
+    'deploy/prepare-compose-host.sh',
+    'deploy/chromium-seccomp.json',
+    'deploy/online_smoke.py',
+    'deploy/systemd/google-manager-compose-monitor@.service',
+    'deploy/systemd/google-manager-compose-monitor@.timer',
     'deploy/backup_database.py', 'deploy/compose_release.py', 'deploy/browser-artifacts.json',
     'deploy/nginx/google-manager.conf',
     'docs/deployment-technical-guide.md', 'docs/server-deployment-guide.md',
     'docs/release-signoff-template.md', 'docs/deployment-preparation.md',
+    'docs/production-manual-configuration.md',
+    'docs/cdk-implementation-and-operations-2026-09-25.md',
     'docs/browser-security-baseline-2026-09-20.md', 'LICENSE',
 }
 EXPECTED_RELEASE_BUNDLE_FILES = EXPECTED_RELEASE_PUBLIC_FILES | {
@@ -53,8 +61,10 @@ EXPECTED_RELEASE_BUNDLE_FILES = EXPECTED_RELEASE_PUBLIC_FILES | {
 KNOWN_FIELDS = {
     'FLASK_ENV',
     'ADMIN_PASSWORD',
+    'ALLOW_TEST_ADMIN_PASSWORD',
     'SECRET_KEY',
     'GMAIL_TOKEN_ENCRYPTION_KEY',
+    'GMAIL_HTTP_TIMEOUT_SECONDS',
     'GOOGLE_MANAGER_IMAGE',
     'PUBLIC_DOMAIN',
     'RECHARGE_MODE',
@@ -73,6 +83,8 @@ KNOWN_FIELDS = {
     'GUNICORN_THREADS',
     'GUNICORN_TIMEOUT',
     'GUNICORN_LOG_LEVEL',
+    'CDK_ENABLED', 'CDK_ACTIVE_KEY_ID', 'CDK_ENCRYPTION_KEYS', 'CDK_LOOKUP_KEYS',
+    'CDK_SMTP_HOST', 'CDK_SMTP_PORT', 'CDK_SMTP_FROM', 'CDK_SMTP_USERNAME', 'CDK_SMTP_PASSWORD',
 }
 
 REQUIRED_FIELDS = {
@@ -134,11 +146,13 @@ MESSAGES = {
     'IMAGE_DIGEST_INVALID': 'GOOGLE_MANAGER_IMAGE must be a non-placeholder registry reference pinned by sha256 digest.',
     'PUBLIC_DOMAIN_INVALID': 'PUBLIC_DOMAIN must be a non-placeholder public DNS hostname.',
     'RECHARGE_MODE_INVALID': 'RECHARGE_MODE must be disabled or live in production.',
+    'CDK_CONFIGURATION_INVALID': 'CDK requires independent versioned keys and a valid enable flag.',
     'RECHARGE_LIVE_URL_REQUIRED': 'Live recharge requires an explicit upstream URL and host allowlist.',
     'RECHARGE_LIVE_URL_INVALID': 'The live recharge upstream must be a safe HTTPS URL on the exact allowlist.',
     'HEADLESS_INVALID': 'HEADLESS must be true for this production deployment profile.',
     'TRUSTED_PROXY_INVALID': 'TRUSTED_PROXY_CIDRS must contain scoped valid CIDR networks.',
     'GUNICORN_SETTING_INVALID': 'A Gunicorn setting is outside the supported production range.',
+    'GMAIL_HTTP_TIMEOUT_INVALID': 'GMAIL_HTTP_TIMEOUT_SECONDS must be a finite positive number.',
     'OAUTH_REDIRECT_PENDING': 'The explicit public OAuth callback remains to be confirmed.',
     'OAUTH_REDIRECT_INVALID': 'GMAIL_REDIRECT_URI must match the public HTTPS callback exactly.',
     'OAUTH_FILE_INVALID': 'The OAuth client credential is missing, unsafe, unreadable, or structurally invalid.',
@@ -546,7 +560,7 @@ def _validate_release_bundle_files(root, metadata, manifest_bytes):
         return False
     checksums = {}
     for line in checksum_text.splitlines():
-        match = re.fullmatch(r'([0-9a-f]{64})  ([A-Za-z0-9._/-]+)', line)
+        match = re.fullmatch(r'([0-9a-f]{64})  ([A-Za-z0-9._/@-]+)', line)
         if not match or match.group(2) in checksums:
             return False
         checksums[match.group(2)] = match.group(1)
@@ -624,6 +638,14 @@ def _validate_integer(value, minimum, maximum):
     return str(parsed) == value and minimum <= parsed <= maximum
 
 
+def _validate_positive_number(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(parsed) and parsed > 0
+
+
 def _validate_oauth_redirect(raw_value, public_domain):
     try:
         parsed = urlsplit(raw_value)
@@ -674,7 +696,7 @@ def _validate_oauth_file(path):
         file_stat = path.lstat()
         if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink():
             return False
-        if file_stat.st_size <= 0 or file_stat.st_size > MAX_CREDENTIAL_BYTES:
+        if file_stat.st_nlink != 1 or file_stat.st_size <= 0 or file_stat.st_size > MAX_CREDENTIAL_BYTES:
             return False
         document = json.loads(path.read_bytes().decode('utf-8-sig'))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
@@ -717,6 +739,7 @@ def _restricted_file_permissions(path, expected_uids=None):
     if (
         stat.S_ISLNK(file_stat.st_mode)
         or not stat.S_ISREG(file_stat.st_mode)
+        or getattr(file_stat, 'st_nlink', 1) != 1
         or file_stat.st_mode & 0o7777 != 0o600
     ):
         return False
@@ -765,6 +788,7 @@ def _runtime_permissions(paths, expected_uid):
                         stack.append((entry_path, depth + 1, root_device))
                     elif (
                         not stat.S_ISREG(entry_stat.st_mode)
+                        or entry_stat.st_nlink != 1
                         or entry_stat.st_mode & 0o7777 != 0o600
                     ):
                         return False
@@ -786,7 +810,7 @@ def _configuration_checks(values):
     if values['FLASK_ENV'] != 'production':
         checks.append(_check('config.production_mode', 'FLASK_ENV', 'failed', 'PRODUCTION_MODE_REQUIRED'))
         valid = False
-    if not _validate_password(values['ADMIN_PASSWORD']):
+    if not _validate_password(values['ADMIN_PASSWORD']) or values.get('ALLOW_TEST_ADMIN_PASSWORD', '0') != '0':
         checks.append(_check('config.admin_password', 'ADMIN_PASSWORD', 'failed', 'ADMIN_PASSWORD_INVALID'))
         valid = False
     if not _validate_secret_key(values['SECRET_KEY']):
@@ -824,6 +848,27 @@ def _configuration_checks(values):
             checks.append(_check('recharge.live_upstream', 'RECHARGE_UPSTREAM_URL', 'failed', 'RECHARGE_LIVE_URL_INVALID'))
             valid = False
 
+    cdk_valid = values.get('CDK_ENABLED', '0') in {'0', '1'}
+    if values.get('CDK_ENABLED') == '1':
+        try:
+            encryption = json.loads(values.get('CDK_ENCRYPTION_KEYS', ''))
+            lookup = json.loads(values.get('CDK_LOOKUP_KEYS', ''))
+            active = values.get('CDK_ACTIVE_KEY_ID', 'v1')
+            cdk_valid = (
+                isinstance(encryption, dict) and isinstance(lookup, dict)
+                and 1 <= len(encryption) <= 4 and 1 <= len(lookup) <= 4
+                and active in encryption and active in lookup
+                and all(re.fullmatch(r'[A-Za-z0-9_]{1,32}', key) for key in [*encryption, *lookup])
+                and all(_validate_fernet_key(value) for value in [*encryption.values(), *lookup.values()])
+                and not set(encryption.values()) & set(lookup.values())
+                and values['GMAIL_TOKEN_ENCRYPTION_KEY'] not in [*encryption.values(), *lookup.values()]
+            )
+        except (ValueError, TypeError, AttributeError):
+            cdk_valid = False
+    if not cdk_valid:
+        checks.append(_check('cdk.configuration', 'CDK_ENABLED', 'failed', 'CDK_CONFIGURATION_INVALID'))
+        valid = False
+
     if values['HEADLESS'].lower() != 'true':
         checks.append(_check('runtime.headless', 'HEADLESS', 'failed', 'HEADLESS_INVALID'))
         valid = False
@@ -840,6 +885,13 @@ def _configuration_checks(values):
         if field in values and values[field] and not _validate_integer(values[field], minimum, maximum):
             checks.append(_check('runtime.gunicorn', field, 'failed', 'GUNICORN_SETTING_INVALID'))
             valid = False
+    if 'GMAIL_HTTP_TIMEOUT_SECONDS' in values and values['GMAIL_HTTP_TIMEOUT_SECONDS'] and not _validate_positive_number(
+        values['GMAIL_HTTP_TIMEOUT_SECONDS']
+    ):
+        checks.append(_check(
+            'runtime.gmail', 'GMAIL_HTTP_TIMEOUT_SECONDS', 'failed', 'GMAIL_HTTP_TIMEOUT_INVALID'
+        ))
+        valid = False
     if 'GUNICORN_BIND' in values and values['GUNICORN_BIND'] not in {'', '0.0.0.0:8002'}:
         checks.append(_check('runtime.gunicorn', 'GUNICORN_BIND', 'failed', 'GUNICORN_SETTING_INVALID'))
         valid = False

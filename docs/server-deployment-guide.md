@@ -85,10 +85,10 @@ chmod 600 .env
 
 ```bash
 test -f credentials.json
-sudo chown 10001:10001 credentials.json
-sudo chmod 600 credentials.json
-sudo install -d -m 700 -o 10001 -g 10001 instance googlemail/runtime googlemail/output
+sudo bash deploy/prepare-compose-host.sh
 ```
+
+必须先停止 Web/worker 等写入服务再运行脚本。它拒绝缺失、符号链接或硬链接形式的 `.env`/`credentials.json`，并拒绝覆盖固定的 `10001:10001` 容器 UID/GID。先检查三个运行目录及所有已有子项，再将普通目录/文件分别收敛为 `0700/0600`、`10001:10001`，`.env` 单独设为 `root:root/0600`；嵌套符号链接、特殊文件或跨设备项在权限修改前拒绝，操作系统错误可能留下部分权限变更，应停服排错重跑。不要设为 `777` 或宿主登录用户所有：属主不匹配会导致 `initialize` 报 `sqlite3.OperationalError: unable to open database file`，或 readiness 报 `gmailConfiguration=false`。后续 preflight/Compose 必须在 root 会话执行，详见 [人工配置手册](production-manual-configuration.md)。
 
 镜像构建上下文通过 .dockerignore 排除 .env、credentials.json、数据库和运行时目录，因此这些文件只从宿主机挂载或由 Compose 注入。
 
@@ -97,7 +97,7 @@ sudo install -d -m 700 -o 10001 -g 10001 instance googlemail/runtime googlemail/
 以下 `up` 流程只适用于首次空的 `instance` 目录。若宿主机已有 `instance/accounts.db`，先按第 8 节停止写入、完成加密备份、结构迁移和存量敏感字段加密，再启动新版本；不得让 Compose 自动初始化后直接尝试读取旧明文。
 
 ```bash
-python3 deploy/preflight.py --env-file .env --project-root .
+sudo python3 deploy/preflight.py --env-file .env --project-root .
 python3 deploy/compose_release.py config --env-file .env --project-root .
 python3 deploy/compose_release.py pull --env-file .env --project-root .
 read -r -p '独立 GO 审批记录中的 manifest SHA-256: ' approved_manifest_sha256

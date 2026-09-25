@@ -8,6 +8,7 @@ from datetime import datetime
 from app import db
 from app.models.account import Account, utc_now
 from app.models.account_history import AccountHistory
+from app.utils.email import canonicalize_email
 from app.utils.totp import generate_totp, get_remaining_seconds
 
 
@@ -39,7 +40,7 @@ def normalize_account_data(data, require_all=False):
                 raise ValueError(f'{display_name}为必填项')
 
     if 'email' in normalized:
-        normalized['email'] = normalized['email'].strip()
+        normalized['email'] = canonicalize_email(normalized['email'])
         if not EMAIL_PATTERN.fullmatch(normalized['email']):
             raise ValueError('邮箱格式无效')
 

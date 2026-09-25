@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from cryptography.fernet import Fernet
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from app import create_app, db
 from app.models.account import Account
@@ -19,6 +21,7 @@ from app.models.gmail_task_log import GmailActionConfirmation, GmailTaskLog
 from app.models.runtime_job import RuntimeJob
 from app.services.account_service import AccountService
 from app.services.gmail_rule_service import GmailRuleService, GmailRuleServiceError
+from app.services.gmail_service import GmailService
 from app.services.runtime_queue import RuntimeQueue
 from app.services.security_service import SecurityService
 from app.worker import maintenance, run_job
@@ -329,6 +332,36 @@ class RuntimeRecoveryTestCase(unittest.TestCase):
             remove=['UNREAD'],
         )
         self.assertEqual(GmailTaskLog.query.one().status, 'succeeded')
+
+    def test_deleted_message_stops_background_action_retries(self):
+        self.rule.requires_confirmation = False
+        db.session.commit()
+        with patch.object(GmailService, 'modify_message', side_effect=RuntimeError('initial timeout')):
+            GmailRuleService.run_rules(self.connection, message_ids=['deleted-after-timeout'])
+        execution = GmailExecution.query.one()
+        execution.lease_until = time.time() - 1
+        db.session.commit()
+        missing = HttpError(Response({'status': '404'}), b'{"error":{"message":"Not found"}}')
+        with patch.object(GmailService, 'modify_message', side_effect=missing) as modify, patch.object(
+            GmailService, 'get_message', side_effect=missing,
+        ):
+            self.assertEqual(GmailRuleService.retry_due_actions()['failed'], 0)
+            self.assertEqual(GmailRuleService.retry_due_actions()['failed'], 0)
+        self.assertEqual(modify.call_count, 1)
+        db.session.expire_all()
+        self.assertEqual(GmailTaskLog.query.one().status, 'skipped')
+
+    def test_deleted_message_confirmation_keeps_review_and_skips_action(self):
+        log = self.acquire_confirmation('deleted-before-confirmation')
+        missing = HttpError(Response({'status': '404'}), b'{"error":{"message":"Not found"}}')
+        with patch.object(GmailService, 'modify_message', side_effect=missing), patch.object(
+            GmailService, 'get_message', side_effect=missing,
+        ):
+            confirmed = GmailRuleService.confirm_log(log, 'synthetic-reviewer')
+        db.session.expire_all()
+        self.assertEqual(confirmed.status, 'skipped')
+        self.assertEqual(confirmed.confirmation.status, 'approved')
+        self.assertEqual(confirmed.confirmation.reviewer, 'synthetic-reviewer')
 
     def test_stale_retry_result_cannot_overwrite_newer_execution_lease(self):
         self.rule.requires_confirmation = False

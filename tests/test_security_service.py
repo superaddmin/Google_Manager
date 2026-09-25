@@ -108,6 +108,20 @@ class SecurityServiceTestCase(unittest.TestCase):
         risk_unlocked = SecurityService.calculate_account_risk(unlocked_acc)
         self.assertFalse(risk_unlocked['isLocked'])
 
+    def test_emergency_unlock_restores_pro_status(self):
+        account = Account(
+            email='pro-suspect@example.com',
+            password='Password123!',
+            status='pro',
+        )
+        db.session.add(account)
+        db.session.commit()
+
+        SecurityService.lock_account(account.id, reason='功能回归测试')
+        unlocked_account = SecurityService.unlock_account(account.id)
+
+        self.assertEqual(unlocked_account.status, 'pro')
+
     def test_security_overview_api(self):
         acc1 = Account(email='a1@example.com', password='123', status='inactive')
         acc2 = Account(email='a2@example.com', password='ComplexPass123!', recovery='rec@example.com', secret='JBSWY3DPEHPK3PXP')

@@ -441,6 +441,8 @@ class SecurityService:
             raise ValueError('账号不存在')
 
         old_status = account.status
+        if old_status != 'locked':
+            account.pre_lock_status = old_status if old_status in {'inactive', 'pro'} else None
         account.status = 'locked'
 
         history = AccountHistory(
@@ -479,12 +481,18 @@ class SecurityService:
         if account.status != 'locked':
             return account
 
-        account.status = 'inactive'
+        restored_status = (
+            account.pre_lock_status
+            if account.pre_lock_status in {'inactive', 'pro'}
+            else 'inactive'
+        )
+        account.status = restored_status
+        account.pre_lock_status = None
         history = AccountHistory(
             account_id=account.id,
             field_name='status',
             old_value='locked',
-            new_value='inactive',
+            new_value=restored_status,
         )
         db.session.add(history)
 

@@ -37,6 +37,7 @@ class Account(db.Model):
     secret = db.Column(EncryptedText(), nullable=True)
     remark = db.Column(db.String(255), nullable=True)
     status = db.Column(db.String(20), default='inactive')
+    pre_lock_status = db.Column(db.String(20), nullable=True)
     sold_status = db.Column(db.String(20), default='unsold')  # 出售状态: sold/unsold
     created_at = db.Column(db.DateTime, default=utc_now)
     updated_at = db.Column(db.DateTime, default=utc_now, onupdate=utc_now)

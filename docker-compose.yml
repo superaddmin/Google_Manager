@@ -6,6 +6,9 @@ services:
     ports:
       - "127.0.0.1:8002:8002"
     init: true
+    security_opt: &browser-security
+      - seccomp=./deploy/chromium-seccomp.json
+    shm_size: 256mb
     stop_grace_period: 60s
     depends_on:
       initialize:
@@ -15,12 +18,24 @@ services:
       - FLASK_ENV=production
       # 管理员面板登录密码（必填，禁止使用默认占位值）
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD 必须在 .env 中显式指定强密码}
+      - ALLOW_TEST_ADMIN_PASSWORD=${ALLOW_TEST_ADMIN_PASSWORD:-0}
       # Flask 会话加密密钥（生产环境至少 32 字符，禁止使用示例值）
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY 必须在 .env 中显式配置至少 32 字符密钥}
       # Gmail OAuth 凭证 Fernet 加密密钥（必填，使用 cryptography.fernet.Fernet.generate_key() 生成）
       - GMAIL_TOKEN_ENCRYPTION_KEY=${GMAIL_TOKEN_ENCRYPTION_KEY:?GMAIL_TOKEN_ENCRYPTION_KEY 必须在 .env 中显式配置}
+      # Gmail OAuth 与 API 请求单次网络超时（秒）
+      - GMAIL_HTTP_TIMEOUT_SECONDS=${GMAIL_HTTP_TIMEOUT_SECONDS:-30}
       # 充值功能模式（disabled: 禁用, mock: 模拟演示, live: 官方生产履约）
       - RECHARGE_MODE=${RECHARGE_MODE:-disabled}
+      - CDK_ENABLED=${CDK_ENABLED:-0}
+      - CDK_ACTIVE_KEY_ID=${CDK_ACTIVE_KEY_ID:-v1}
+      - CDK_ENCRYPTION_KEYS=${CDK_ENCRYPTION_KEYS:-}
+      - CDK_LOOKUP_KEYS=${CDK_LOOKUP_KEYS:-}
+      - CDK_SMTP_HOST=${CDK_SMTP_HOST:-}
+      - CDK_SMTP_PORT=${CDK_SMTP_PORT:-465}
+      - CDK_SMTP_FROM=${CDK_SMTP_FROM:-}
+      - CDK_SMTP_USERNAME=${CDK_SMTP_USERNAME:-}
+      - CDK_SMTP_PASSWORD=${CDK_SMTP_PASSWORD:-}
       # 充值上游服务 API 地址
       - RECHARGE_UPSTREAM_URL=${RECHARGE_UPSTREAM_URL:-}
       # live 模式上游主机白名单
@@ -78,6 +93,8 @@ services:
     image: *application-image
     command: ["python", "-m", "app.worker"]
     init: true
+    security_opt: *browser-security
+    shm_size: 256mb
     restart: unless-stopped
     stop_grace_period: 60s
     environment: *application-environment

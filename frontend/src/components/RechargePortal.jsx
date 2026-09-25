@@ -1,8 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Moon, ShieldCheck, Sun } from 'lucide-react';
-import RechargeView from './RechargeView';
+const RechargeView = lazy(() => import('./RechargeView'));
+const CdkPortal = lazy(() => import('./CdkPortal'));
 
 const RechargePortal = () => {
+    const legacy = new URLSearchParams(window.location.search).get('service') === 'legacy';
     const [darkMode, setDarkMode] = useState(() => {
         try {
             return JSON.parse(localStorage.getItem('darkMode')) === true;
@@ -18,7 +20,7 @@ const RechargePortal = () => {
             localStorage.setItem('darkMode', JSON.stringify(darkMode));
         } catch {}
         document.documentElement.classList.toggle('dark', darkMode);
-        document.title = 'GoogleManager 充值中心';
+        document.title = 'Chat GPT充值中心';
     }, [darkMode]);
 
     useEffect(() => () => clearTimeout(notificationTimerRef.current), []);
@@ -38,8 +40,8 @@ const RechargePortal = () => {
                             <ShieldCheck size={20} />
                         </div>
                         <div>
-                            <p className="font-bold leading-tight">GoogleManager 充值中心</p>
-                            <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>自助充值、进度查询与订阅管理</p>
+                            <p className="font-bold leading-tight">Chat GPT充值中心</p>
+                            <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>CDK 卡密充值、进度查询与订阅管理</p>
                         </div>
                     </div>
                     <button
@@ -55,7 +57,13 @@ const RechargePortal = () => {
             </header>
 
             <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
-                <RechargeView darkMode={darkMode} showNotification={showNotification} />
+                <nav aria-label="充值服务" className="flex flex-wrap gap-3 mb-6">
+                    <a className={`rounded-lg px-4 py-2 ${!legacy ? 'bg-emerald-700 text-white' : 'border border-slate-400/30'}`} href="/recharge" aria-current={!legacy ? 'page' : undefined}>CDK 卡密充值</a>
+                    <a className={`rounded-lg px-4 py-2 ${legacy ? 'bg-emerald-700 text-white' : 'border border-slate-400/30'}`} href="/recharge?service=legacy" aria-current={legacy ? 'page' : undefined}>原卡密订单与订阅服务</a>
+                </nav>
+                <Suspense fallback={<p className="p-6">正在加载充值服务…</p>}>
+                    {legacy ? <RechargeView darkMode={darkMode} showNotification={showNotification} /> : <CdkPortal embedded />}
+                </Suspense>
             </main>
 
             {notification && (
